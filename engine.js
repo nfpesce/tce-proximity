@@ -239,6 +239,12 @@ export async function bids(express = "No", currency = "USD", tce = "N") {
   const g = await bidTable(express, currency, tce);
   g.forEach(x => (x._item = itemNumber(x.bid_item)));
   g.sort((a, b) => a.proximity - b.proximity || cmp(a.quotenumber, b.quotenumber) || a._item - b._item);
+  // tot_lines_qty = suma de quotelines_quantity de todos los bid-items del quote (sin filtros)
+  const totQty = new Map();
+  for (const f of ds.bidFirst.values()) {
+    const v = f.quotelines_quantity;
+    totQty.set(f.quotenumber, (totQty.get(f.quotenumber) ?? 0) + (v === null || v === undefined || Number.isNaN(v) ? 0 : v));
+  }
   return g.map((x, i) => {
     const f = ds.bidFirst.get(x.bid_item) || {};
     return {
@@ -246,7 +252,8 @@ export async function bids(express = "No", currency = "USD", tce = "N") {
       opp_number: x.opp_label, account: x.account_label, product: x.product, bid_pn: f.bid_pn ?? "",
       proximity: x.proximity, forecast: f.forecast ?? "", sales_rep: f.sales_rep ?? "",
       country: f.country ?? "", status: f.status ?? "", contract_start: f.contractstartdate ?? "",
-      quotelines_quantity: num(f.quotelines_quantity ?? null), total_final_price: num(f.totalfinalprice), end_customer: f.end_customer ?? "",
+      quotelines_quantity: num(f.quotelines_quantity ?? null), tot_lines_qty: num(totQty.get(x.quotenumber) ?? null),
+      total_final_price: num(f.totalfinalprice), end_customer: f.end_customer ?? "",
     };
   });
 }

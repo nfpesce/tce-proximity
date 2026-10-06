@@ -599,6 +599,7 @@ const BID_COLS = [
   { key: "country", label: "Country" },
   { key: "contract_start", label: "Contract start" },
   { key: "quotelines_quantity", label: "quotelines_quantity", num: true },
+  { key: "tot_lines_qty", label: "tot_lines_qty", num: true },
   { key: "total_final_price", label: "Total quote (final price)", num: true },
 ];
 
@@ -656,7 +657,7 @@ async function renderBids(params) {
           <td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}">${esc(b.quotenumber)}</a></td>
           <td class="mono">${esc(b.opp_number)}</td><td class="trunc" title="${esc(b.account)}">${esc(b.account)}</td><td class="trunc" title="${esc(b.product)}">${esc(b.product)}</td>
           <td>${esc(b.forecast)}</td><td class="trunc" title="${esc(b.sales_rep)}">${esc(b.sales_rep)}</td><td>${esc(b.country)}</td><td>${esc(b.contract_start)}</td>
-          <td class="num">${fmt(b.quotelines_quantity)}</td><td class="num">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
+          <td class="num">${fmt(b.quotelines_quantity)}</td><td class="num" title="Sum of quotelines_quantity of all bid-items in the bid">${fmt(b.tot_lines_qty)}</td><td class="num">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
       </table></div>
       <div class="count">${fmt(rows.length)} of ${fmt(data.length)} bid-items${rows.length > shown.length ? " (showing the first 2,000; use the filters or export)" : ""}</div>`;
     $$("th.sortable", $("#body")).forEach(th => th.onclick = () => {
