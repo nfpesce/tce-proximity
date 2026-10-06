@@ -1,0 +1,10 @@
+# NUNCA publicar datos: los CSV/Excel son confidenciales y se abren localmente en el navegador
+*.csv
+*.xlsx
+*.xls
+tce_overrides*.json
+# resultados esperados de los tests (generados desde el CSV real -> contienen datos)
+tests/expected*.json
+# varios
+.DS_Store
+Thumbs.db

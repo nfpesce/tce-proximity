@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TCE Proximity</title>
+  <meta name="description" content="TCE Proximity dashboard. Quote files are processed locally in your browser and never uploaded.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">TCE</span>
+      <div>
+        <h1>TCE Proximity</h1>
+        <div class="sub" id="meta-line">No file open</div>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <a href="#/ranking" data-view="ranking">1. TCE Classification</a>
+      <a href="#/quote" data-view="quote">2. Quote Detail</a>
+      <a href="#/fc" data-view="fc">3. Ranking by FC</a>
+      <a href="#/bids" data-view="bids">4. Bid-Item Ranking</a>
+      <a href="#/adjustments" data-view="adjustments">5. Adjustments</a>
+    </nav>
+    <div class="filebox">
+      <span class="local-badge" title="The file is processed in this browser and never uploaded">Local data</span>
+      <span class="file-name" id="file-name">No file open</span>
+      <button id="open-btn" class="btn">Open CSV…</button>
+      <input type="file" id="file-input" accept=".csv,text/csv" hidden>
+    </div>
+    <div id="adj-banner" class="adj-banner" hidden></div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <div id="loading" class="loading" hidden><div class="spinner"></div><span id="loading-text">Loading…</span></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TCE Proximity - equivalence test</title>
+  <style>
+    body { font: 14px/1.4 "Segoe UI", system-ui, sans-serif; margin: 20px; background: #fff; color: #1c2129; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    td, th { border-bottom: 1px solid #dde1e7; padding: 4px 8px; text-align: left; vertical-align: top; }
+    .ok { color: #1d7a3e; font-weight: 600; } .fail { color: #b3141c; font-weight: 600; }
+    code { font-size: 12px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>Browser engine vs Python API</h1>
+  <p id="status">Running…</p>
+  <table><thead><tr><th>#</th><th>Request</th><th>Result</th><th>Detail</th></tr></thead><tbody id="out"></tbody></table>
+  <script type="module" src="compare.js"></script>
+</body>
+</html>
