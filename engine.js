@@ -86,6 +86,7 @@ export async function loadFile(file, name = file.name) {
         ${v("featurecode")} AS featurecode, ${v("description")} AS description,
         ${v("TCE_Actual")} AS tce_csv, ${v("TCE_Actual")} AS tce,
         COALESCE(TRY_CAST("quantity" AS DOUBLE), 0) AS quantity,
+        TRY_CAST("quotelines_quantity" AS DOUBLE) AS quotelines_quantity,
         ${v("contractstartdate")} AS contractstartdate, ${v("opp_number")} AS opp_number,
         ${v("forecast_category_name")} AS forecast, ${v("quotelines_productcategoryname_3")} AS product,
         ${v("bid_PN")} AS bid_pn, ${v("Bid_Item")} AS bid_item, ${v("quotetype")} AS quotetype,
@@ -245,7 +246,7 @@ export async function bids(express = "No", currency = "USD", tce = "N") {
       opp_number: x.opp_label, account: x.account_label, product: x.product, bid_pn: f.bid_pn ?? "",
       proximity: x.proximity, forecast: f.forecast ?? "", sales_rep: f.sales_rep ?? "",
       country: f.country ?? "", status: f.status ?? "", contract_start: f.contractstartdate ?? "",
-      total_final_price: num(f.totalfinalprice), end_customer: f.end_customer ?? "",
+      quotelines_quantity: num(f.quotelines_quantity ?? null), total_final_price: num(f.totalfinalprice), end_customer: f.end_customer ?? "",
     };
   });
 }
@@ -264,8 +265,11 @@ export async function quoteDetail(quote) {
   const groups = new Map();
   for (const r of q) {
     const key = [r.bid_item, r.bid_pn, r.product, r.express, r.featurecode, r.description].join("\u0000");
-    if (!groups.has(key)) groups.set(key, { r, N: 0, Y: 0, NM: 0 });
+    if (!groups.has(key)) groups.set(key, { r, N: 0, Y: 0, NM: 0, qlq: null });
     const g = groups.get(key);
+    // quotelines_quantity: constante por bid-item; max() como en pandas (ignora vacíos)
+    const qq = r.quotelines_quantity;
+    if (qq !== null && qq !== undefined && !Number.isNaN(qq) && (g.qlq === null || qq > g.qlq)) g.qlq = qq;
     if (r.tce === "N") g.N += r.quantity; else if (r.tce === "Y") g.Y += r.quantity; else g.NM += r.quantity;
   }
   const list = [...groups.values()];
@@ -273,9 +277,9 @@ export async function quoteDetail(quote) {
     || (fcPos.get(a.r.featurecode) - fcPos.get(b.r.featurecode))
     || (descPos.get(a.r.description) - descPos.get(b.r.description)));
   list.sort((a, b) => (itemNumber(a.r.bid_item) - itemNumber(b.r.bid_item)) || (b.N - a.N) || (b.Y - a.Y) || (b.NM - a.NM));
-  const rowsOut = list.map(({ r, N, Y, NM }) => ({
+  const rowsOut = list.map(({ r, N, Y, NM, qlq }) => ({
     item: itemLabel(r.bid_item), bid_item: r.bid_item, bid_pn: r.bid_pn, product: r.product, express: r.express,
-    featurecode: r.featurecode, description: r.description, N: num(N), Y: num(Y), "Not Mapped": num(NM),
+    featurecode: r.featurecode, description: r.description, quotelines_quantity: num(qlq), N: num(N), Y: num(Y), "Not Mapped": num(NM),
     adjusted_from: r.featurecode in ds.overrides ? (ds.fcCsvTce.get(r.featurecode) ?? null) : null,
   }));
 

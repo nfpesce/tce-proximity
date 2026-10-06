@@ -386,6 +386,8 @@ const DETAIL_COLS = [
   { key: "express", label: "Bid_Item_Is_Express" },
   { key: "featurecode", label: "featurecode", cls: "mono" },
   { key: "description", label: "description" },
+  // cantidad de sistemas del bid-item (fuera del grupo TCE; filtro de texto, sin totales)
+  { key: "quotelines_quantity", label: "quotelines_quantity", qty: true },
   { key: "N", label: "N", num: true },
   { key: "Y", label: "Y", num: true },
   { key: "Not Mapped", label: "Not Mapped", num: true },
@@ -446,8 +448,8 @@ async function renderQuote(quote, params) {
     </div>
     <div class="table-wrap"><table>
       <thead>
-        <tr><th colspan="6"></th><th colspan="3" class="group">TCE</th></tr>
-        <tr>${DETAIL_COLS.map(c => `<th class="${c.num ? "num" : ""}">${c.label}</th>`).join("")}</tr>
+        <tr><th colspan="7"></th><th colspan="3" class="group">TCE</th></tr>
+        <tr>${DETAIL_COLS.map(c => `<th class="${c.num || c.qty ? "num" : ""}">${c.label}</th>`).join("")}</tr>
         <tr class="filters">${DETAIL_COLS.map(c => c.num
           ? `<th><select data-f="${c.key}" aria-label="Filter ${c.label}"><option value="">all</option><option value="gt0">&gt; 0</option><option value="eq0">= 0</option></select></th>`
           : `<th><input type="search" data-f="${c.key}" placeholder="filter" aria-label="Filter ${c.label}"></th>`).join("")}</tr>
@@ -483,6 +485,7 @@ async function renderQuote(quote, params) {
     });
     const cell = (c, r) => {
       const v = r[c.key];
+      if (c.qty) return `<td class="num">${v == null ? "" : fmt(v)}</td>`;
       if (c.num) {
         const cls = v === 0 ? "zero" : c.key === "N" ? "nval" : c.key === "Y" ? "yval" : "";
         return `<td class="num ${cls}">${fmt(v)}</td>`;
@@ -494,10 +497,10 @@ async function renderQuote(quote, params) {
       return `<td class="${c.cls || ""}">${esc(v)}</td>`;
     };
     $("#d-body").innerHTML = rows.map(r => `<tr class="${r.N > 0 ? "has-n" : ""}">${DETAIL_COLS.map(c => cell(c, r)).join("")}</tr>`).join("")
-      || `<tr><td colspan="9" class="empty">No rows match these filters</td></tr>`;
+      || `<tr><td colspan="${DETAIL_COLS.length}" class="empty">No rows match these filters</td></tr>`;
     const sum = k => rows.reduce((a, r) => a + (r[k] || 0), 0);
     const nLines = rows.filter(r => r.N > 0).length;
-    $("#d-foot").innerHTML = `<td colspan="6">Total (${fmt(rows.length)} rows · ${nLines} FC in N)</td>
+    $("#d-foot").innerHTML = `<td colspan="6">Total (${fmt(rows.length)} rows · ${nLines} FC in N)</td><td></td>
       <td class="num">${fmt(sum("N"))}</td><td class="num">${fmt(sum("Y"))}</td><td class="num">${fmt(sum("Not Mapped"))}</td>`;
     $("#d-count").textContent = `${fmt(rows.length)} of ${fmt(data.rows.length)} rows`;
   };
@@ -595,6 +598,7 @@ const BID_COLS = [
   { key: "sales_rep", label: "Sales rep" },
   { key: "country", label: "Country" },
   { key: "contract_start", label: "Contract start" },
+  { key: "quotelines_quantity", label: "quotelines_quantity", num: true },
   { key: "total_final_price", label: "Total quote (final price)", num: true },
 ];
 
@@ -624,7 +628,8 @@ async function renderBids(params) {
 
   const proxVals = [...new Set(data.map(b => b.proximity))].sort((a, b) => a - b);
   $("#f-prox").innerHTML += proxVals.map(v => `<option>${v}</option>`).join("");
-  const st = { sort: "rank", dir: 1 };
+  // orden por defecto: total del quote descendente (pedido del usuario)
+  const st = { sort: "total_final_price", dir: -1 };
 
   const draw = () => {
     const q = $("#f-q").value.trim().toLowerCase();
@@ -651,7 +656,7 @@ async function renderBids(params) {
           <td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}">${esc(b.quotenumber)}</a></td>
           <td class="mono">${esc(b.opp_number)}</td><td class="trunc" title="${esc(b.account)}">${esc(b.account)}</td><td class="trunc" title="${esc(b.product)}">${esc(b.product)}</td>
           <td>${esc(b.forecast)}</td><td class="trunc" title="${esc(b.sales_rep)}">${esc(b.sales_rep)}</td><td>${esc(b.country)}</td><td>${esc(b.contract_start)}</td>
-          <td class="num">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
+          <td class="num">${fmt(b.quotelines_quantity)}</td><td class="num">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
       </table></div>
       <div class="count">${fmt(rows.length)} of ${fmt(data.length)} bid-items${rows.length > shown.length ? " (showing the first 2,000; use the filters or export)" : ""}</div>`;
     $$("th.sortable", $("#body")).forEach(th => th.onclick = () => {
