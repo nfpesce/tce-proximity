@@ -94,10 +94,10 @@ function multiSelect(box, values, selected, allLabel, noun, onApply, id = "f-pro
 // Filtros de selección múltiple (componente multiSelect + etiquetas con "×" de lo elegido).
 // En la URL: "<clave>=A|B"; en la API: "?<api>=A&<api>=B". Ninguno elegido = todos.
 const MULTI = {
-  products: { api: "product", meta: "product_values", label: "System (quotelines_productcategoryname_3)", all: "All systems", noun: "systems" },
-  countries: { api: "country", meta: "country_values", label: "Country", all: "All countries", noun: "countries", compact: true },
-  forecasts: { api: "forecast", meta: "forecast_values", label: "Opp. status (forecast_category_name)", all: "All opp. statuses", noun: "statuses", compact: true },
-  statuses: { api: "status", meta: "status_values", label: "Bid status (status)", all: "All bid statuses", noun: "statuses", compact: true },
+  products: { api: "product", meta: "product_values", label: "System (quotelines_productcategoryname_3)", short: "System", all: "All systems", noun: "systems" },
+  countries: { api: "country", meta: "country_values", label: "Country", short: "Country", all: "All countries", noun: "countries" },
+  forecasts: { api: "forecast", meta: "forecast_values", label: "Opp. status (forecast_category_name)", short: "Forecast (opp. status)", all: "All", noun: "statuses" },
+  statuses: { api: "status", meta: "status_values", label: "Bid status (status)", short: "Bid status", all: "All", noun: "statuses" },
 };
 const multiParams = (params, keys) => Object.fromEntries(keys.map(k => [k, (params.get(k) || "").split("|").filter(Boolean)]));
 const multiHash = sel => Object.fromEntries(Object.entries(sel).map(([k, v]) => [k, v.join("|")]));
@@ -105,10 +105,11 @@ function multiQs(qsp, sel) {
   for (const [k, vals] of Object.entries(sel)) vals.forEach(v => qsp.append(MULTI[k].api, v));
   return qsp;
 }
-function multiFieldsHtml(sel) {
+// inline = compacto, en la misma barra que los demás filtros (etiqueta corta; la completa en el tooltip)
+function multiFieldsHtml(sel, inline = false) {
   return Object.entries(sel).map(([k, vals]) => `
-    <div class="ms-group${MULTI[k].compact ? " compact" : ""}">
-      <div class="field"><label for="f-${k}">${esc(MULTI[k].label)}</label><div id="f-${k}-box"></div></div>
+    <div class="ms-group${inline ? " inline" : ""}">
+      <div class="field"><label for="f-${k}" title="${esc(MULTI[k].label)}">${esc(inline ? MULTI[k].short : MULTI[k].label)}</label><div id="f-${k}-box"></div></div>
       <div class="sel-chips" id="sel-${k}">${vals.map(s => `
         <span class="sel-chip" title="${esc(s)}">${esc(s)}<button type="button" data-remove="${esc(s)}" aria-label="Remove ${esc(s)}">×</button></span>`).join("")}</div>
     </div>`).join("");
@@ -308,7 +309,8 @@ async function renderRanking(params) {
     <div class="toolbar">
       ${filterFields(p)}
       ${tceField(p)}
-      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="opp, opp status, account, bid, bid-item, product" value="${esc(q)}" size="30"></div>
+      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="opp, opp status, account, bid, bid-item, product" value="${esc(q)}" size="16"></div>
+      ${multiFieldsHtml(multi, true)}
       <div class="spacer"></div>
       <div class="actions">
         <button class="btn" id="expand-all">Expand all</button>
@@ -316,7 +318,6 @@ async function renderRanking(params) {
         <button class="btn primary" id="export">Export to Excel</button>
       </div>
     </div>
-    <div class="toolbar multi-bar">${multiFieldsHtml(multi)}</div>
     <div id="body"><div class="empty">Loading…</div></div>`;
 
   const go = (extra = {}, replace = false) => setHash("ranking", "", { ...p, ...multiHash(multi), prox, q: $("#f-q").value.trim(), ...extra }, replace);
@@ -643,13 +644,13 @@ async function renderBids(params) {
     <div class="toolbar">
       ${filterFields(p)}
       ${tceField(p)}
-      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="bid-item, bid, opp, account, rep…" size="30"></div>
+      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="bid-item, bid, opp, account, rep…" size="16"></div>
       <div class="field"><label for="f-prox">Proximity</label><select id="f-prox"><option value="">(All)</option></select></div>
       <div class="field"><label for="f-opp">Opportunity</label><select id="f-opp"><option value="">(All)</option><option value="with">With opp</option><option value="without">Without opp</option></select></div>
+      ${multiFieldsHtml(multi, true)}
       <div class="spacer"></div>
       <div class="actions"><button class="btn primary" id="export">Export to Excel</button></div>
     </div>
-    <div class="toolbar multi-bar">${multiFieldsHtml(multi)}</div>
     <div id="body"><div class="empty">Loading…</div></div>`;
   const go = extra => setHash("bids", "", { ...p, ...multiHash(multi), ...extra });
   $("#f-express").onchange = e => go({ express: e.target.value });
