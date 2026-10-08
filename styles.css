@@ -148,8 +148,9 @@ input:focus, select:focus, .btn:focus-visible { outline: 2px solid var(--link); 
 .ms-group .sel-chips { align-self: flex-end; padding-bottom: 4px; }
 /* versión compacta, en la misma línea que los demás filtros (vistas 1 y 4) */
 .ms-group.inline { flex: 0 1 auto; gap: 6px; }
-.ms-group.inline .ms-btn { min-width: 130px; max-width: 200px; }
-.ms-group.inline .sel-chips { flex: 0 1 auto; }
+.ms-group.inline .ms-btn { min-width: 110px; max-width: 190px; gap: 6px; padding: 6px 8px; }
+.toolbar:has(.ms-group.inline) { gap: 10px; }
+.ms-group.inline .sel-chips { flex: 0 1 auto; gap: 4px; }
 td.nowrap { white-space: nowrap; }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }

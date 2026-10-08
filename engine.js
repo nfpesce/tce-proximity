@@ -25,6 +25,9 @@ export const BLANK = "(blank)";   // valor vacío en los filtros de selección m
 
 // Filtros de selección múltiple (como MULTI_FILTERS en app/data.py): nombre en la API -> columna de `raw`
 const MULTI_FILTERS = { product: "product", country: "country", forecast: "forecast", status: "status" };
+// Orden de las opciones de forecast (como FORECAST_ORDER en app/data.py); otros valores al final, alfabéticos
+const FORECAST_ORDER = [BLANK, "Pipeline", "Best Case", "Commit", "Won"].map(x => x.toLowerCase());
+const forecastRank = v => { const i = FORECAST_ORDER.indexOf(String(v).toLowerCase()); return i < 0 ? FORECAST_ORDER.length : i; };
 
 export class DataError extends Error {}
 
@@ -171,7 +174,7 @@ export async function meta() {
     contract_start_min: m.dmin ?? null, contract_start_max: m.dmax ?? null,
     express_values: await distinct("express"), currency_values: await distinct("currency"),
     tce_counts: counts, product_values: await distinct("product"),
-    country_values: await distinctBlank("country"), forecast_values: await distinctBlank("forecast"),
+    country_values: await distinctBlank("country"), forecast_values: (await distinctBlank("forecast")).sort((a, b) => forecastRank(a) - forecastRank(b) || cmp(a, b)),
     status_values: await distinctBlank("status"),
   };
 }
@@ -337,15 +340,20 @@ export function searchQuotes(text, limit = 15) {
 }
 
 // ---------------------------------------------------- 3. FC ranking
+// proximity: un valor o una lista (selección múltiple); null = todas. "up to" = k <= máximo de la lista
 export async function fcRanking(proximity = 1, criteria = "exactly", express = "No", currency = "USD", products = null) {
   need();
   criteria = String(criteria).toLowerCase();
   if (criteria !== "exactly" && criteria !== "up to") throw new DataError("criteria must be 'exactly' or 'up to'");
-  const op = criteria === "up to" ? "<=" : "=";
-  const n = await rows(`WITH n AS (SELECT rid, bid_item, featurecode, description, quotenumber, opp_label, account_label, product
-                                   FROM raw WHERE ${where({ express, currency, tce: "N", products })}),
-                             k AS (SELECT bid_item, CAST(count(*) AS INTEGER) AS k FROM n GROUP BY bid_item)
-                        SELECT n.*, k.k FROM n JOIN k USING (bid_item) WHERE k.k ${op} ${Number(proximity)} ORDER BY n.rid`);
+  const prox = proximity === null || proximity === undefined ? null
+    : [...new Set([].concat(proximity).map(Number))].sort((a, b) => a - b);
+  const cond = !prox || !prox.length ? "TRUE"
+    : criteria === "up to" ? `k.k <= ${Math.max(...prox)}` : `k.k IN (${prox.join(", ")})`;
+  const kSql = `WITH n AS (SELECT rid, bid_item, featurecode, description, quotenumber, opp_label, account_label, product
+                           FROM raw WHERE ${where({ express, currency, tce: "N", products })}),
+                     k AS (SELECT bid_item, CAST(count(*) AS INTEGER) AS k FROM n GROUP BY bid_item)`;
+  const n = await rows(`${kSql} SELECT n.*, k.k FROM n JOIN k USING (bid_item) WHERE ${cond} ORDER BY n.rid`);
+  const proxValues = (await rows(`${kSql} SELECT DISTINCT k FROM k ORDER BY k`)).map(r => r.k);
   const seen = new Set(), scope = [];
   for (const r of n) {
     const key = r.bid_item + "\u0000" + r.featurecode + "\u0000" + r.description;
@@ -356,7 +364,9 @@ export async function fcRanking(proximity = 1, criteria = "exactly", express = "
   const fcs = [...byFc.entries()].map(([fc, list]) => ({ fc, list }));
   fcs.sort((a, b) => (b.list.length - a.list.length) || cmp(a.fc, b.fc));
   return {
-    filters: { proximity: Number(proximity), criteria, express, currency, product: products && products.length ? products : null },
+    filters: { proximity: prox && prox.length ? (prox.length === 1 ? prox[0] : prox) : null, criteria, express, currency,
+               product: products && products.length ? products : null },
+    proximity_values: proxValues,
     configs_in_scope: new Set(scope.map(r => r.bid_item)).size,
     lines_in_scope: scope.length,
     rows: fcs.map(({ fc, list }) => ({

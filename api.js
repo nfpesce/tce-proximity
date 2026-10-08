@@ -123,9 +123,15 @@ export async function api(url, opts = {}) {
     }
     if (method === "GET" && path === "/api/search") return engine.searchQuotes(param(qs, "q", ""));
     if (method === "GET" && path === "/api/fc-ranking") {
-      const p = param(qs, "proximity", "1");
-      if (!/^\d+$/.test(p) || Number(p) < 1) throw new ApiError(422, "proximity must be an integer >= 1");
-      return await engine.fcRanking(Number(p), param(qs, "criteria", "exactly"), opt(param(qs, "express", "No")),
+      // ?proximity=1&proximity=3 (selección múltiple); sin parámetro = 1; "all" = todas
+      const ps = qs.getAll("proximity");
+      let prox = [1];
+      if (ps.includes("all")) prox = null;
+      else if (ps.length) {
+        if (ps.some(x => !/^\d+$/.test(x) || Number(x) < 1)) throw new ApiError(422, "proximity must be an integer >= 1");
+        prox = ps.map(Number);
+      }
+      return await engine.fcRanking(prox, param(qs, "criteria", "exactly"), opt(param(qs, "express", "No")),
                                     opt(param(qs, "currency", "USD")), products(qs));
     }
     if (method === "GET" && path === "/api/fc-search") return engine.searchFc(param(qs, "q", ""));
@@ -201,7 +207,7 @@ export async function exportUrl(url) {
     return writeXlsx({
       "FC ranking": r.rows.map(x => ({ featurecode: x.featurecode, description: x.description, configs: x.configs })),
       Configs: r.rows.flatMap(x => x.bids.map(b => ({ featurecode: x.featurecode, ...b }))),
-    }, `TCE_by_FC_${r.filters.criteria}_${r.filters.proximity}.xlsx`);
+    }, `TCE_by_FC_${r.filters.proximity === null ? "all" : [].concat(r.filters.proximity).join("-")}.xlsx`);
   }
   const m = /^\/api\/export\/quote\/(.+)\.xlsx$/.exec(path);
   if (m) {
