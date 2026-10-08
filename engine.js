@@ -21,6 +21,10 @@ export const EXPECTED_COLUMNS = [
 export const TCE_VALUES = ["N", "Y", "Not Mapped"];
 export const NO_OPP = "(no opp)";
 export const NO_ACCOUNT = "(no account)";
+export const BLANK = "(blank)";   // valor vacío en los filtros de selección múltiple
+
+// Filtros de selección múltiple (como MULTI_FILTERS en app/data.py): nombre en la API -> columna de `raw`
+const MULTI_FILTERS = { product: "product", country: "country", forecast: "forecast", status: "status" };
 
 export class DataError extends Error {}
 
@@ -159,6 +163,7 @@ export async function meta() {
       min(contractstartdate) FILTER (WHERE contractstartdate <> '') AS dmin,
       max(contractstartdate) FILTER (WHERE contractstartdate <> '') AS dmax FROM raw`))[0];
   const distinct = async col => (await rows(`SELECT DISTINCT ${col} v FROM raw`)).map(r => r.v).sort(cmp);
+  const distinctBlank = async col => (await rows(`SELECT DISTINCT ${col} v FROM raw`)).map(r => r.v || BLANK).sort(cmp);
   const counts = Object.fromEntries(TCE_VALUES.map(v => [v, 0]));
   for (const r of await rows(`SELECT tce, CAST(count(*) AS INTEGER) n FROM raw GROUP BY tce`)) counts[r.tce] = r.n;
   return {
@@ -166,11 +171,13 @@ export async function meta() {
     contract_start_min: m.dmin ?? null, contract_start_max: m.dmax ?? null,
     express_values: await distinct("express"), currency_values: await distinct("currency"),
     tce_counts: counts, product_values: await distinct("product"),
+    country_values: await distinctBlank("country"), forecast_values: await distinctBlank("forecast"),
+    status_values: await distinctBlank("status"),
   };
 }
 
 // ------------------------------------------------------------------ helpers
-function where({ express, currency, tce, products } = {}) {
+function where({ express, currency, tce, products, multi = {} } = {}) {
   const w = ["TRUE"];
   if (tce) {
     if (!TCE_VALUES.includes(tce)) throw new DataError(`TCE_Actual must be one of: ${TCE_VALUES.join(", ")}`);
@@ -179,39 +186,46 @@ function where({ express, currency, tce, products } = {}) {
   if (express) w.push(`express = ${sq(express)}`);
   if (currency) w.push(`currency = ${sq(currency)}`);
   if (products && products.length) w.push(`product IN (${products.map(sq).join(", ")})`);
+  for (const [k, vals] of Object.entries(multi))
+    if (vals && vals.length) w.push(`${MULTI_FILTERS[k]} IN (${vals.map(v => sq(v === BLANK ? "" : v)).join(", ")})`);
   return w.join(" AND ");
 }
 
 /** Una fila por bid-item con su proximity (sólo los que tienen >= 1 línea con TCE = tce), en orden de aparición */
-async function bidTable(express, currency, tce = "N") {
+async function bidTable(express, currency, tce = "N", multi = {}) {
   return rows(`SELECT opp_label, account_label, quotenumber, bid_item, product,
                  CAST(count(*) AS INTEGER) AS proximity, min(rid) AS r
-               FROM raw WHERE ${where({ express, currency, tce })}
+               FROM raw WHERE ${where({ express, currency, tce, multi })}
                GROUP BY opp_label, account_label, quotenumber, bid_item, product ORDER BY r`);
 }
 
 // ---------------------------------------------------------- 1. ranking
-export async function ranking(express = "No", currency = "USD", tce = "N") {
+// multi: { product, country, forecast, status } -> lista de valores o null (sin filtro)
+const multiOut = multi => Object.fromEntries(Object.keys(MULTI_FILTERS).map(k => [k, multi[k] && multi[k].length ? multi[k] : null]));
+
+export async function ranking(express = "No", currency = "USD", tce = "N", multi = {}) {
   need();
-  const g = await bidTable(express, currency, tce);
+  const g = await bidTable(express, currency, tce, multi);
   g.forEach(x => (x._item = itemNumber(x.bid_item)));
   g.sort((a, b) => a.proximity - b.proximity || a._item - b._item);   // estable
 
   const tree = new Map();
   for (const x of g) {
     const key = x.opp_label + "\u0000" + x.account_label;
-    if (!tree.has(key)) tree.set(key, { opp: x.opp_label, account: x.account_label, q: new Map() });
+    // forecast_category_name es constante por quote y por oportunidad
+    if (!tree.has(key)) tree.set(key, { opp: x.opp_label, account: x.account_label, q: new Map(),
+                                        forecast: ds.bidFirst.get(x.bid_item)?.forecast ?? "" });
     const qmap = tree.get(key).q;
     if (!qmap.has(x.quotenumber)) qmap.set(x.quotenumber, []);
     qmap.get(x.quotenumber).push({ bid_item: x.bid_item, product: x.product, proximity: x.proximity });
   }
   const opps = [];
-  for (const { opp, account, q } of tree.values()) {
+  for (const { opp, account, q, forecast } of tree.values()) {
     const quotes = [...q.entries()].map(([quotenumber, bids]) =>
       ({ quotenumber, total: bids.reduce((a, b) => a + b.proximity, 0), bids }));
     quotes.sort((a, b) => quoteKeyCmp(a.quotenumber, b.quotenumber));
     const all = quotes.flatMap(x => x.bids);
-    opps.push({ opp_number: opp, account, total: quotes.reduce((a, x) => a + x.total, 0),
+    opps.push({ opp_number: opp, account, forecast: opp === NO_OPP ? "" : forecast, total: quotes.reduce((a, x) => a + x.total, 0),
                 min_proximity: Math.min(...all.map(b => b.proximity)), n_bids: all.length, quotes });
   }
   opps.sort((a, b) => ((a.opp_number === NO_OPP) - (b.opp_number === NO_OPP)) || (a.total - b.total)
@@ -222,7 +236,7 @@ export async function ranking(express = "No", currency = "USD", tce = "N") {
   for (const p of [...new Set(g.map(x => x.proximity))].sort((a, b) => a - b))
     dist[String(p)] = g.filter(x => x.proximity === p).length;
   return {
-    filters: { express, currency, tce },
+    filters: { express, currency, tce, ...multiOut(multi) },
     summary: {
       opps: new Set(withOpp.map(x => x.opp_label)).size,
       quotes: new Set(g.map(x => x.quotenumber)).size,
@@ -234,9 +248,9 @@ export async function ranking(express = "No", currency = "USD", tce = "N") {
 }
 
 // ------------------------------------------------------------ bids flat
-export async function bids(express = "No", currency = "USD", tce = "N") {
+export async function bids(express = "No", currency = "USD", tce = "N", multi = {}) {
   need();
-  const g = await bidTable(express, currency, tce);
+  const g = await bidTable(express, currency, tce, multi);
   g.forEach(x => (x._item = itemNumber(x.bid_item)));
   g.sort((a, b) => a.proximity - b.proximity || cmp(a.quotenumber, b.quotenumber) || a._item - b._item);
   // tot_lines_qty = suma de quotelines_quantity de todos los bid-items del quote (sin filtros)

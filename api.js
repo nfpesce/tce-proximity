@@ -83,7 +83,10 @@ function tceParam(v) {
     throw new ApiError(400, `tce must be one of: ${engine.TCE_VALUES.join(", ")} or all`);
   return v;
 }
-const products = qs => { const v = qs.getAll("product").filter(x => x && x !== "all"); return v.length ? v : null; };
+const values = (qs, name) => { const v = qs.getAll(name).filter(x => x && x !== "all"); return v.length ? v : null; };
+const products = qs => values(qs, "product");
+// filtros de selección múltiple de las vistas 1 y 4 (?country=A&country=B, etc.)
+const multi = qs => Object.fromEntries(["product", "country", "forecast", "status"].map(k => [k, values(qs, k)]));
 
 function adjustmentsPayload() {
   const items = Object.entries(store.overrides())
@@ -110,9 +113,9 @@ export async function api(url, opts = {}) {
       return m;
     }
     if (method === "GET" && path === "/api/ranking")
-      return engine.ranking(opt(param(qs, "express", "No")), opt(param(qs, "currency", "USD")), tceParam(param(qs, "tce", "N")));
+      return engine.ranking(opt(param(qs, "express", "No")), opt(param(qs, "currency", "USD")), tceParam(param(qs, "tce", "N")), multi(qs));
     if (method === "GET" && path === "/api/bids")
-      return engine.bids(opt(param(qs, "express", "No")), opt(param(qs, "currency", "USD")), tceParam(param(qs, "tce", "N")));
+      return engine.bids(opt(param(qs, "express", "No")), opt(param(qs, "currency", "USD")), tceParam(param(qs, "tce", "N")), multi(qs));
     if (method === "GET" && seg[1] === "quote" && seg.length === 3) {
       const q = await engine.quoteDetail(seg[2]);
       if (!q) throw new ApiError(404, `Quote ${seg[2]} not found`);
@@ -188,7 +191,7 @@ export async function exportUrl(url) {
   if (path === "/api/export/ranking.xlsx") {
     const r = await api(base.href);
     const rows = r.opps.flatMap(o => o.quotes.flatMap(q => q.bids.map(b => ({
-      opp_number: o.opp_number, account: o.account, opp_total: o.total, quotenumber: q.quotenumber,
+      opp_number: o.opp_number, forecast_category_name: o.forecast, account: o.account, opp_total: o.total, quotenumber: q.quotenumber,
       Bid_Item: b.bid_item, product: b.product, "TCE Proximity": b.proximity }))));
     return writeXlsx({ "TCE Proximity": rows }, "TCE_Proximity_ranking.xlsx");
   }

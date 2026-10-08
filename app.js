@@ -1,10 +1,10 @@
 /* TCE Proximity — GitHub Pages version (static site, data processed locally in the browser).
  * Derivado de app/static/app.js (versión Python). La API /api/... la atiende api.js (DuckDB-WASM).
  * Rutas (hash):
- *   #/ranking?express=No&currency=USD          hoja 1. Quotes Details
+ *   #/ranking?express=No&currency=USD&countries=A|B&forecasts=..&statuses=..   hoja 1. Quotes Details
  *   #/quote/<quote>?bid=<bid_item>             hoja 2. Quote Detail (Filters)
  *   #/fc?proximity=1&criteria=exactly&...      hoja 3. TCE Proximity by FC
- *   #/bids?express=No&currency=USD             ranking plano de bids
+ *   #/bids?express=No&currency=USD&products=A|B&forecasts=..   ranking plano de bids
  */
 import { api as localApi, exportUrl, loadFile as localLoad, initEngine, pickFile, reopenLast, lastHandle,
          canPickFiles, exportAdjustmentsFile, importAdjustmentsFile } from "./api.js";
@@ -41,13 +41,13 @@ function bidsSummary(rows) {
 
 // Desplegable con checkboxes (selección múltiple). onApply(lista) se llama al apretar Apply
 // o al cerrar el panel con cambios. Lista vacía = todos.
-function multiSelect(box, values, selected, allLabel, noun, onApply) {
+function multiSelect(box, values, selected, allLabel, noun, onApply, id = "f-product") {
   let sel = new Set(selected);
   const summary = () => !selected.length ? allLabel
     : selected.length === 1 ? selected[0] : `${selected.length} ${noun} selected`;
   box.className = "ms";
   box.innerHTML = `
-    <button type="button" class="ms-btn" id="f-product" aria-haspopup="true" aria-expanded="false"
+    <button type="button" class="ms-btn" id="${esc(id)}" aria-haspopup="true" aria-expanded="false"
       title="${esc(selected.join("\n") || allLabel)}"><span>${esc(summary())}</span><span class="ms-caret">▾</span></button>
     <div class="ms-panel" hidden>
       <input type="search" class="ms-search" placeholder="Search ${esc(noun)}…">
@@ -89,6 +89,37 @@ function multiSelect(box, values, selected, allLabel, noun, onApply) {
   };
   panel.onkeydown = e => { if (e.key === "Escape") { close(false); btn.focus(); } };
   count();
+}
+
+// Filtros de selección múltiple (componente multiSelect + etiquetas con "×" de lo elegido).
+// En la URL: "<clave>=A|B"; en la API: "?<api>=A&<api>=B". Ninguno elegido = todos.
+const MULTI = {
+  products: { api: "product", meta: "product_values", label: "System (quotelines_productcategoryname_3)", all: "All systems", noun: "systems" },
+  countries: { api: "country", meta: "country_values", label: "Country", all: "All countries", noun: "countries", compact: true },
+  forecasts: { api: "forecast", meta: "forecast_values", label: "Opp. status (forecast_category_name)", all: "All opp. statuses", noun: "statuses", compact: true },
+  statuses: { api: "status", meta: "status_values", label: "Bid status (status)", all: "All bid statuses", noun: "statuses", compact: true },
+};
+const multiParams = (params, keys) => Object.fromEntries(keys.map(k => [k, (params.get(k) || "").split("|").filter(Boolean)]));
+const multiHash = sel => Object.fromEntries(Object.entries(sel).map(([k, v]) => [k, v.join("|")]));
+function multiQs(qsp, sel) {
+  for (const [k, vals] of Object.entries(sel)) vals.forEach(v => qsp.append(MULTI[k].api, v));
+  return qsp;
+}
+function multiFieldsHtml(sel) {
+  return Object.entries(sel).map(([k, vals]) => `
+    <div class="ms-group${MULTI[k].compact ? " compact" : ""}">
+      <div class="field"><label for="f-${k}">${esc(MULTI[k].label)}</label><div id="f-${k}-box"></div></div>
+      <div class="sel-chips" id="sel-${k}">${vals.map(s => `
+        <span class="sel-chip" title="${esc(s)}">${esc(s)}<button type="button" data-remove="${esc(s)}" aria-label="Remove ${esc(s)}">×</button></span>`).join("")}</div>
+    </div>`).join("");
+}
+// go(nuevaSelección) se llama al aplicar cambios en un desplegable o al quitar una etiqueta
+function wireMultiFields(sel, go) {
+  for (const [k, vals] of Object.entries(sel)) {
+    const m = MULTI[k];
+    multiSelect($(`#f-${k}-box`), state.meta?.[m.meta] || [], vals, m.all, m.noun, v => go({ ...sel, [k]: v }), `f-${k}`);
+    $$("[data-remove]", $(`#sel-${k}`)).forEach(b => b.onclick = () => go({ ...sel, [k]: vals.filter(x => x !== b.dataset.remove) }));
+  }
 }
 
 // "XXXXX000000001-7" -> "item-7" (el bid ya se muestra en la columna quotenumber)
@@ -270,13 +301,14 @@ async function renderRanking(params) {
   const p = commonParams(params);
   const prox = params.get("prox") || "";
   const q = params.get("q") || "";
+  const multi = multiParams(params, ["countries", "forecasts", "statuses"]);
   view.innerHTML = `
     <div class="view-head"><h2>TCE Proximity Classification</h2>
       <span class="hint">${linesHint(p.tce)} Click a bid-item to see its detail.</span></div>
     <div class="toolbar">
       ${filterFields(p)}
       ${tceField(p)}
-      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="opp, account, bid, bid-item, product" value="${esc(q)}" size="30"></div>
+      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="opp, opp status, account, bid, bid-item, product" value="${esc(q)}" size="30"></div>
       <div class="spacer"></div>
       <div class="actions">
         <button class="btn" id="expand-all">Expand all</button>
@@ -284,21 +316,24 @@ async function renderRanking(params) {
         <button class="btn primary" id="export">Export to Excel</button>
       </div>
     </div>
+    <div class="toolbar multi-bar">${multiFieldsHtml(multi)}</div>
     <div id="body"><div class="empty">Loading…</div></div>`;
 
-  const go = (extra = {}, replace = false) => setHash("ranking", "", { ...p, prox, q: $("#f-q").value.trim(), ...extra }, replace);
+  const go = (extra = {}, replace = false) => setHash("ranking", "", { ...p, ...multiHash(multi), prox, q: $("#f-q").value.trim(), ...extra }, replace);
   $("#f-express").onchange = e => { p.express = e.target.value; go(); };
   $("#f-currency").onchange = e => { p.currency = e.target.value; go(); };
   $("#f-tce").onchange = e => { p.tce = e.target.value; go({ prox: "" }); };
+  wireMultiFields(multi, sel => go(multiHash(sel)));
+  const qs = multiQs(new URLSearchParams(filterQs(p)), multi).toString();
   let t; $("#f-q").oninput = () => {
     clearTimeout(t);
     t = setTimeout(() => { go({}, true); if (data) drawRanking(data, prox, $("#f-q").value.trim()); }, 200);
   };
-  $("#export").onclick = () => downloadLink(`/api/export/ranking.xlsx?${filterQs(p)}`);
+  $("#export").onclick = () => downloadLink(`/api/export/ranking.xlsx?${qs}`);
 
   let data;
   try {
-    data = await api(`/api/ranking?${filterQs(p)}`);
+    data = await api(`/api/ranking?${qs}`);
   } catch (e) { $("#body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
 
   $("#expand-all").onclick = () => { data.opps.forEach(o => state.rankingOpen[o.opp_number + "|" + o.account] = true); drawRanking(data, prox, $("#f-q").value.trim()); };
@@ -311,7 +346,7 @@ function drawRanking(data, prox, q) {
   const chips = Object.entries(s.distribution).map(([k, v]) =>
     `<button class="chip${prox === k ? " on" : ""}" data-prox="${k}">${data.filters.tce === "N" || !data.filters.tce ? "Proximity" : "Lines"} ${proxBadge(Number(k))}<span class="n">${fmt(v)}</span></button>`).join("");
   const ql = q.toLowerCase();
-  const match = (o, qq, b) => !ql || [o.opp_number, o.account, qq.quotenumber, b.bid_item, b.product].some(x => String(x).toLowerCase().includes(ql));
+  const match = (o, qq, b) => !ql || [o.opp_number, o.forecast, o.account, qq.quotenumber, b.bid_item, b.product].some(x => String(x).toLowerCase().includes(ql));
 
   const rows = [];
   let shownBids = 0;
@@ -331,7 +366,7 @@ function drawRanking(data, prox, q) {
     const oppTotal = noopp ? "" : `<div class="opp-total">${counts}</div>`;
     if (!open) {
       rows.push(`<tr class="opp-first collapsed${noopp ? " noopp" : ""}">
-        <td class="opp-cell">${toggle}<span class="mono">${esc(o.opp_number)}</span></td><td>${esc(o.account)}</td>
+        <td class="opp-cell">${toggle}<span class="mono">${esc(o.opp_number)}</span></td><td class="nowrap">${esc(o.forecast)}</td><td>${esc(o.account)}</td>
         <td colspan="3" class="muted">${counts ? counts + " — " : ""}click + to see the detail</td>
         <td></td></tr>`);
       continue;
@@ -341,6 +376,7 @@ function drawRanking(data, prox, q) {
       const firstQ = qq.quotenumber !== lastQuote; lastQuote = qq.quotenumber;
       rows.push(`<tr class="${i === 0 ? "opp-first" : ""}">
         <td class="opp-cell">${i === 0 ? toggle + `<span class="mono">${esc(o.opp_number)}</span>` : ""}</td>
+        <td class="nowrap">${i === 0 ? esc(o.forecast) : ""}</td>
         <td>${i === 0 ? esc(o.account) + oppTotal : ""}</td>
         <td class="mono">${firstQ ? `<a href="#/quote/${encodeURIComponent(qq.quotenumber)}">${esc(qq.quotenumber)}</a>` : ""}</td>
         <td class="mono"><a href="#/quote/${encodeURIComponent(qq.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
@@ -360,9 +396,9 @@ function drawRanking(data, prox, q) {
     <div class="toolbar"><div class="chips"><span class="muted">Filter by proximity:</span>
       <button class="chip${!prox ? " on" : ""}" data-prox="">All<span class="n">${fmt(s.bids)}</span></button>${chips}</div></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>opp_number</th><th>opportunities_parentaccountidname</th><th>quotenumber</th><th>Bid_Item</th>
+      <thead><tr><th>opp_number</th><th>forecast_category_name</th><th>opportunities_parentaccountidname</th><th>quotenumber</th><th>Bid_Item</th>
         <th>quotelines_productcategoryname_3</th><th class="num">${linesLabel(data.filters.tce || "all")}</th></tr></thead>
-      <tbody>${rows.join("") || `<tr><td colspan="6" class="empty">No results</td></tr>`}</tbody>
+      <tbody>${rows.join("") || `<tr><td colspan="7" class="empty">No results</td></tr>`}</tbody>
     </table></div>
     <div class="count">${fmt(shownBids)} bid-items shown</div>`;
 
@@ -374,7 +410,8 @@ function drawRanking(data, prox, q) {
   });
   $$(".chip[data-prox]", $("#body")).forEach(c => c.onclick = () => {
     const { params } = parseHash();
-    setHash("ranking", "", { ...commonParams(params), prox: c.dataset.prox, q: $("#f-q").value.trim() });
+    setHash("ranking", "", { ...commonParams(params), ...multiHash(multiParams(params, ["countries", "forecasts", "statuses"])),
+      prox: c.dataset.prox, q: $("#f-q").value.trim() });
   });
 }
 
@@ -514,7 +551,7 @@ async function renderQuote(quote, params) {
 // ------------------------------------------------------- 3. Ranking por FC
 async function renderFc(params) {
   // Sistemas elegidos: en la URL como "products=A|B"; vacío = todos
-  const products = (params.get("products") || "").split("|").filter(Boolean);
+  const multi = multiParams(params, ["products"]);
   const p = { ...commonParams(params), proximity: params.get("proximity") || "1", criteria: params.get("criteria") || "exactly" };
   view.innerHTML = `
     <div class="view-head"><h2>TCE Proximity - Top Feature Code Detractors to be TCE Config</h2>
@@ -525,22 +562,16 @@ async function renderFc(params) {
         <option value="exactly"${p.criteria === "exactly" ? " selected" : ""}>Exactly (= value)</option>
         <option value="up to"${p.criteria === "up to" ? " selected" : ""}>Up to (≤ value)</option></select></div>
       ${filterFields(p)}
-      <div class="field field-wide"><label for="f-product">System (quotelines_productcategoryname_3)</label>
-        <div id="f-product-box"></div></div>
-      <div class="sel-chips" id="sel-systems">${products.map(s => `
-        <span class="sel-chip" title="${esc(s)}">${esc(s)}<button type="button" data-remove="${esc(s)}" aria-label="Remove ${esc(s)}">×</button></span>`).join("")}</div>
+      ${multiFieldsHtml(multi)}
       <div class="actions"><button class="btn primary" id="export">Export to Excel</button></div>
     </div>
     <div id="body"><div class="empty">Loading…</div></div>`;
 
-  const go = (sel = products) => setHash("fc", "", { ...p, proximity: Math.max(1, parseInt($("#f-prox").value, 10) || 1), criteria: $("#f-crit").value,
-    express: $("#f-express").value, currency: $("#f-currency").value, products: sel.join("|") });
+  const go = (sel = multi) => setHash("fc", "", { ...p, proximity: Math.max(1, parseInt($("#f-prox").value, 10) || 1), criteria: $("#f-crit").value,
+    express: $("#f-express").value, currency: $("#f-currency").value, ...multiHash(sel) });
   ["#f-crit", "#f-express", "#f-currency", "#f-prox"].forEach(s => $(s).onchange = () => go());
-  multiSelect($("#f-product-box"), state.meta?.product_values || [], products, "All systems", "systems", sel => go(sel));
-  $$("[data-remove]", $("#sel-systems")).forEach(b => b.onclick = () => go(products.filter(x => x !== b.dataset.remove)));
-  const qsp = new URLSearchParams(p);
-  products.forEach(x => qsp.append("product", x));
-  const qs = qsp.toString();
+  wireMultiFields(multi, go);
+  const qs = multiQs(new URLSearchParams(p), multi).toString();
   $("#export").onclick = () => downloadLink(`/api/export/fc-ranking.xlsx?${qs}`);
 
   let data;
@@ -605,6 +636,7 @@ const BID_COLS = [
 
 async function renderBids(params) {
   const p = commonParams(params);
+  const multi = multiParams(params, ["products", "forecasts"]);
   view.innerHTML = `
     <div class="view-head"><h2>Bid-Item Ranking</h2>
       <span class="hint">${p.tce === "N" ? "All bid-items with at least one N line, from closest to farthest from TCE." : linesHint(p.tce)} Click a header to sort.</span></div>
@@ -617,14 +649,18 @@ async function renderBids(params) {
       <div class="spacer"></div>
       <div class="actions"><button class="btn primary" id="export">Export to Excel</button></div>
     </div>
+    <div class="toolbar multi-bar">${multiFieldsHtml(multi)}</div>
     <div id="body"><div class="empty">Loading…</div></div>`;
-  $("#f-express").onchange = e => setHash("bids", "", { ...p, express: e.target.value });
-  $("#f-currency").onchange = e => setHash("bids", "", { ...p, currency: e.target.value });
-  $("#f-tce").onchange = e => setHash("bids", "", { ...p, tce: e.target.value });
-  $("#export").onclick = () => downloadLink(`/api/export/bids.xlsx?${filterQs(p)}`);
+  const go = extra => setHash("bids", "", { ...p, ...multiHash(multi), ...extra });
+  $("#f-express").onchange = e => go({ express: e.target.value });
+  $("#f-currency").onchange = e => go({ currency: e.target.value });
+  $("#f-tce").onchange = e => go({ tce: e.target.value });
+  wireMultiFields(multi, sel => go(multiHash(sel)));
+  const qs = multiQs(new URLSearchParams(filterQs(p)), multi).toString();
+  $("#export").onclick = () => downloadLink(`/api/export/bids.xlsx?${qs}`);
 
   let data;
-  try { data = await api(`/api/bids?${filterQs(p)}`); }
+  try { data = await api(`/api/bids?${qs}`); }
   catch (e) { $("#body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
 
   const proxVals = [...new Set(data.map(b => b.proximity))].sort((a, b) => a - b);

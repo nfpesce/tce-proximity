@@ -143,6 +143,13 @@ input:focus, select:focus, .btn:focus-visible { outline: 2px solid var(--link); 
 .ms-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
 .toolbar .actions { display: flex; gap: 8px; }
 
+/* grupo filtro de selección múltiple + etiquetas de lo elegido */
+.ms-group { display: flex; align-items: flex-end; gap: 10px; flex: 1 1 360px; min-width: 0; }
+.ms-group .sel-chips { align-self: flex-end; padding-bottom: 4px; }
+.ms-group.compact .ms-btn { min-width: 220px; max-width: 300px; }
+.toolbar.multi-bar { margin-top: -6px; }
+td.nowrap { white-space: nowrap; }
+
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; box-shadow: var(--shadow); }
 .kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
