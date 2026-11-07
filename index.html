@@ -19,15 +19,17 @@
     <nav class="tabs" id="tabs">
       <a href="#/ranking" data-view="ranking">1. TCE Classification</a>
       <a href="#/quote" data-view="quote">2. Quote Detail</a>
-      <a href="#/fc" data-view="fc">3. Ranking by FC</a>
-      <a href="#/bids" data-view="bids">4. Bid-Item Ranking</a>
-      <a href="#/adjustments" data-view="adjustments">5. Adjustments</a>
+      <a href="#/fc" data-view="fc">3. Proximity by FC</a>
+      <a href="#/dependency" data-view="dependency">4. Dependency by FC</a>
+      <a href="#/bids" data-view="bids">5. Bid-Item Ranking</a>
+      <a href="#/ww" data-view="ww">6. WW Ranking</a>
+      <a href="#/adjustments" data-view="adjustments">7. Adjustments</a>
     </nav>
     <div class="filebox">
       <span class="local-badge" title="The file is processed in this browser and never uploaded">Local data</span>
       <span class="file-name" id="file-name">No file open</span>
-      <button id="open-btn" class="btn">Open CSV…</button>
-      <input type="file" id="file-input" accept=".csv,text/csv" hidden>
+      <button id="open-btn" class="btn">Open file…</button>
+      <input type="file" id="file-input" accept=".xlsx,.csv" hidden>
     </div>
     <div id="adj-banner" class="adj-banner" hidden></div>
   </header>
