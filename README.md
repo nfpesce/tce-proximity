@@ -17,7 +17,11 @@ it must never contain data files (see `.gitignore`).
    6. WW Ranking · 7. Adjustments. Values are in USD (bid-item value = `bid_item_value_usd`); revenue contribution of an
    FC = value of every configuration that includes it (TCE Sel = only fully TCE configurations).
 4. WW Ranking: choose the data files of NA, AP, LA and EMEA at once (the geo is taken from the start of each file name).
-5. TCE adjustments are saved in the browser (localStorage). Use **Export adjustments / Import…** in tab 7 to move
+5. **Shipments**: open the shipments extraction (.csv of the Magellan query, all geos in one file) or switch with the
+   **Quotes / Shipments** selector at the top. The same analysis is done by SBB (FC and basic name as reference;
+   configuration = mfgsoline, order = SO). Pick the geo at the top (NA, AP, LA, Europe, META; PRC is not included);
+   the WW Ranking uses the 5 geos of the same file. Shipments adjustments are kept apart from the quotes ones.
+6. TCE adjustments are saved in the browser (localStorage). Use **Export adjustments / Import…** in tab 7 to move
    them to another computer or browser (same `tce_overrides.json` format as the Python version). An adjustment is
    removed automatically when a newer data file brings a different source value for that feature code.
 
@@ -61,5 +65,6 @@ python -m http.server 8020
 
 Open `http://localhost:8020/Github_Pages_Version/tests/compare.html` (NA CSV of Oct 4, **68/68 OK**) and
 `compare.html?set=na28` (`DATA/Quotes October/NA Quotes Oct28.xlsx`, **64/64 OK**; add `&nocache=1` to test the
-.xlsx conversion instead of the browser cache). They compare the API responses of the browser engine (rankings,
+.xlsx conversion instead of the browser cache) and `compare.html?set=ship` (`DATA/Shipments October/shipments 2026 oct30.csv`,
+**51/51 OK**: SBB views, geo changes and the 5-geo WW ranking). They compare the API responses of the browser engine (rankings,
 dependency, quote details, revenue contribution, adjustments flow, errors) with the Python API.

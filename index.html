@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TCE Proximity</title>
-  <meta name="description" content="TCE Proximity dashboard. Quote files are processed locally in your browser and never uploaded.">
+  <meta name="description" content="TCE Proximity dashboard. Quote and shipment files are processed locally in your browser and never uploaded.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -26,6 +26,11 @@
       <a href="#/adjustments" data-view="adjustments">7. Adjustments</a>
     </nav>
     <div class="filebox">
+      <div class="seg" id="source-seg" role="group" aria-label="Data source" title="Data source: quotes (one file per geo) or shipments (one .csv with all geos, analysed by SBB)">
+        <button type="button" data-source="quotes" aria-pressed="true" class="on">Quotes</button><button type="button" data-source="shipments" aria-pressed="false">Shipments</button>
+      </div>
+      <label for="geo-select" id="geo-label" class="geo-label" hidden>Geo</label>
+      <select id="geo-select" hidden title="Shipments geo (Europe + META = EMEA of quotes)"></select>
       <span class="local-badge" title="The file is processed in this browser and never uploaded">Local data</span>
       <span class="file-name" id="file-name">No file open</span>
       <button id="open-btn" class="btn">Open file…</button>

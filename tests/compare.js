@@ -5,9 +5,10 @@
  *  - los datos servidos desde la raíz del proyecto:  python -m http.server 8020  (en la carpeta del proyecto)
  * Abrir: http://localhost:8020/Github_Pages_Version/tests/compare.html            (CSV NA Oct 4)
  *        http://localhost:8020/Github_Pages_Version/tests/compare.html?set=na28  (NA Quotes Oct28.xlsx)
+ *        http://localhost:8020/Github_Pages_Version/tests/compare.html?set=ship  (shipments CSV: SBB, geos, WW)
  * El .xlsx se convierte en el navegador la primera vez y queda en la caché (IndexedDB); ?nocache=1 la borra antes.
  */
-import { api, loadFile, useStore, OverrideStore, ApiError } from "../api.js";
+import { api, loadFile, useStore, OverrideStore, ApiError, selectGeo } from "../api.js";
 
 const IGNORE = new Set(["ts", "updated", "storage"]);   // marcas de tiempo / dónde se guarda: difieren legítimamente
 
@@ -57,7 +58,11 @@ try {
 
   for (const [i, c] of expected.cases.entries()) {
     let status = 200, actual, d = null;
-    try { actual = await api(c.url, { method: c.method, body: c.body ? JSON.stringify(c.body) : undefined }); }
+    try {
+      // "GEO": cambio de geo de shipments (no es una ruta de la API)
+      actual = c.method === "GEO" ? (await selectGeo(c.url), null)
+        : await api(c.url, { method: c.method, body: c.body ? JSON.stringify(c.body) : undefined });
+    }
     catch (e) { status = e instanceof ApiError ? e.status : 500; actual = { detail: e.message }; }
     if (status !== c.status) d = `status ${status} (expected ${c.status}): ${actual.detail ?? ""}`;
     else if (status === 200) d = diff(c.expected, actual);

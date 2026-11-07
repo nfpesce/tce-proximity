@@ -8,10 +8,13 @@
  *   #/bids?express=No&currency=USD&products=A|B&countries=..&forecasts=..   ranking plano de bids
  *   #/ww?prox=1          "TCE Proximity WW Detractors Ranking" (las 4 geos)
  * Defaults de Express / Currency desde Oct 28: All (como la hoja Methodology). Importes en USD (bid_item_value_usd).
+ * Origen de datos (selector del encabezado): Quotes o Shipments. En Shipments el mismo análisis es por SBB
+ * (FC como referencia), configuración = mfgsoline, orden = SO y la geo se elige en el encabezado (LABELS / L).
  */
 import { api as localApi, exportUrl, loadFile as localLoad, initEngine, pickFile, reopenLast, lastHandle,
          canPickFiles, exportAdjustmentsFile, importAdjustmentsFile, setProgressHandler,
-         pickWwFiles, reopenWwFiles, lastWwHandles, setWwFiles } from "./api.js";
+         pickWwFiles, reopenWwFiles, lastWwHandles, setWwFiles,
+         selectGeo as localGeo, switchSource as localSwitch, SHIP_GEOS } from "./api.js";
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -62,7 +65,40 @@ function wireSort(box, st, rows, redraw, get = pathGet) {
 }
 const sortState = name => state.sorts[name] || (state.sorts[name] = { key: null, dir: 1 });
 const pctFmt = (x, d = 1) => (x === null || x === undefined) ? "" : (100 * x).toFixed(d) + "%";
-const VALUE_HINT = "Bid-item value in USD = sales price × quotelines_quantity / exchange rate (bid_item_value_usd of the query).";
+// Textos que dependen del origen de datos. L.<clave> devuelve el del origen activo.
+const LABELS = {
+  quotes: {
+    code: "FC", codeName: "feature code", codes: "feature codes", codeCol: "featurecode", descCol: "description",
+    opp: "Opportunity", opps: "Opportunities", oppCol: "opp_number", oppStatusCol: "forecast_category_name",
+    accountCol: "opportunities_parentaccountidname", account: "Account", noOpp: "(no opp)",
+    quote: "Quote", quoteLow: "quote", quoteCol: "quotenumber", quotes: "Bids (quotes)", bidWord: "bid", bidsWord: "bids",
+    item: "bid-item", items: "bid-items", Item: "Bid-item", Items: "Bid-items", itemCol: "Bid_Item",
+    product: "Product", productCol: "quotelines_productcategoryname_3", pnCol: "bid_PN",
+    value: "Bid Item Price (USD)", tceCol: "TCE_Actual", line: "line", lines: "lines",
+    contract: "Contract start", qtyCol: "quotelines_quantity", totQty: "tot_lines_qty", qtyName: "quantity",
+    total: "Total quote (final price)",
+    valueHint: "Bid-item value in USD = sales price × quotelines_quantity / exchange rate (bid_item_value_usd of the query).",
+  },
+  shipments: {
+    code: "SBB", codeName: "SBB", codes: "SBBs", codeCol: "sbb", descCol: "productid_des",
+    opp: "Customer", opps: "Customers", oppCol: "end_customer_number", oppStatusCol: "segment1",
+    accountCol: "end_customer_name", account: "Customer", noOpp: "(no customer)",
+    quote: "Order (SO)", quoteLow: "order", quoteCol: "so", quotes: "Orders (SO)", bidWord: "SO", bidsWord: "SOs",
+    item: "config", items: "configs", Item: "Config", Items: "Configs", itemCol: "mfgsoline",
+    product: "Family", productCol: "family", pnCol: "mtm",
+    value: "Config value (USD)", tceCol: "sbb_tce_flag", line: "SBB", lines: "SBBs",
+    contract: "Ship date", qtyCol: "qty", totQty: "SO qty", qtyName: "sbbusage",
+    total: "SO value (USD)",
+    valueHint: "Configuration value in USD = MAX(revenue_num) of the mfgsoline (query rule 3; credits can be negative).",
+  },
+};
+const isShip = () => (state.meta?.source ?? state.source) === "shipments";
+const L = new Proxy({}, { get: (_, k) => LABELS[isShip() ? "shipments" : "quotes"][k] });
+// Columnas de referencia de un SBB (sólo shipments): FC(s) y basicname
+const refTh = (st, cls = "") => isShip() ? (st ? sortTh("FC(s)", "ref_fc", st, cls, "Feature codes of the SBB (fc column)") + sortTh("Basic name", "basicname", st, cls)
+  : `<th title="Feature codes of the SBB (fc column)">FC(s)</th><th>Basic name</th>`) : "";
+const refTd = r => isShip() ? `<td class="mono trunc" title="${esc(r.ref_fc)}">${esc(r.ref_fc)}</td><td class="nowrap">${esc(r.basicname)}</td>` : "";
+const refN = () => isShip() ? 2 : 0;
 
 function proxBadge(p) {
   const cls = p >= 5 ? "p5" : "p" + p;
@@ -75,11 +111,12 @@ function bidsSummary(rows) {
   const per = new Map();
   for (const [qq] of rows) per.set(qq.quotenumber, (per.get(qq.quotenumber) || 0) + 1);
   const n = [...per.values()];
-  const items = k => `item${k === 1 ? "" : "s"}`;
-  if (n.length === 1) return `1 bid - ${n[0]} ${items(n[0])}`;
-  if (n.every(x => x === n[0])) return `${n.length} bids - ${n[0]} ${items(n[0])} per bid`;
+  const w = isShip() ? "config" : "item";
+  const items = k => `${w}${k === 1 ? "" : "s"}`;
+  if (n.length === 1) return `1 ${L.bidWord} - ${n[0]} ${items(n[0])}`;
+  if (n.every(x => x === n[0])) return `${n.length} ${L.bidsWord} - ${n[0]} ${items(n[0])} per ${L.bidWord}`;
   const list = n.slice(0, -1).join(", ") + " & " + n[n.length - 1];
-  return `${n.length} bids - ${list} items per bid`;
+  return `${n.length} ${L.bidsWord} - ${list} ${w}s per ${L.bidWord}`;
 }
 
 // Desplegable con checkboxes (selección múltiple). onApply(lista) se llama al apretar Apply
@@ -142,6 +179,13 @@ const MULTI = {
   forecasts: { api: "forecast", meta: "forecast_values", label: "Opp. status (forecast_category_name)", short: "Forecast (opp. status)", all: "All", noun: "statuses" },
   statuses: { api: "status", meta: "status_values", label: "Bid status (status)", short: "Bid status", all: "All", noun: "statuses" },
 };
+// mismos filtros en shipments (sistema = family, forecast = segment1, status = sc_status)
+const MULTI_SHIP = {
+  products: { label: "Family (family)", short: "Family", all: "All families", noun: "families" },
+  forecasts: { label: "Customer segment (segment1)", short: "Segment", all: "All", noun: "segments" },
+  statuses: { label: "Ship status (sc_status)", short: "Ship status", all: "All", noun: "statuses" },
+};
+const ml = k => ({ ...MULTI[k], ...(isShip() ? MULTI_SHIP[k] : {}) });
 const multiParams = (params, keys) => Object.fromEntries(keys.map(k => [k, (params.get(k) || "").split("|").filter(Boolean)]));
 const multiHash = sel => Object.fromEntries(Object.entries(sel).map(([k, v]) => [k, v.join("|")]));
 function multiQs(qsp, sel) {
@@ -152,7 +196,7 @@ function multiQs(qsp, sel) {
 function multiFieldsHtml(sel, inline = false) {
   return Object.entries(sel).map(([k, vals]) => `
     <div class="ms-group${inline ? " inline" : ""}">
-      <div class="field"><label for="f-${k}" title="${esc(MULTI[k].label)}">${esc(inline ? MULTI[k].short : MULTI[k].label)}</label><div id="f-${k}-box"></div></div>
+      <div class="field"><label for="f-${k}" title="${esc(ml(k).label)}">${esc(inline ? ml(k).short : ml(k).label)}</label><div id="f-${k}-box"></div></div>
       <div class="sel-chips" id="sel-${k}">${vals.map(selChipHtml).join("")}</div>
     </div>`).join("");
 }
@@ -161,14 +205,14 @@ const selChipHtml = s => `
 // go(nuevaSelección) se llama al aplicar cambios en un desplegable o al quitar una etiqueta
 function wireMultiFields(sel, go) {
   for (const [k, vals] of Object.entries(sel)) {
-    const m = MULTI[k];
+    const m = ml(k);
     multiSelect($(`#f-${k}-box`), state.meta?.[m.meta] || [], vals, m.all, m.noun, v => go({ ...sel, [k]: v }), `f-${k}`);
     $$("[data-remove]", $(`#sel-${k}`)).forEach(b => b.onclick = () => go({ ...sel, [k]: vals.filter(x => x !== b.dataset.remove) }));
   }
 }
 
-// "XXXXX000000001-7" -> "item-7" (el bid ya se muestra en la columna quotenumber)
-const itemLabel = bidItem => "item-" + String(bidItem).split("-").pop();
+// "XXXXX000000001-7" -> "item-7" (el bid ya se muestra en la columna quotenumber); un mfgsoline va completo
+const itemLabel = bidItem => String(bidItem).includes("-") ? "item-" + String(bidItem).split("-").pop() : String(bidItem);
 
 // TCE values: Y / N / Not Mapped
 const TCE_VALUES = ["Y", "N", "Not Mapped"];
@@ -242,6 +286,8 @@ function selectHtml(id, values, current, allLabel = "(All)") {
 
 function filterFields(p) {
   const m = state.meta || { express_values: ["No", "Yes"], currency_values: ["CAD", "USD"] };
+  // shipments no tiene Express ni moneda (todo en USD): quedan ocultos en "all"
+  if (isShip()) return `<input type="hidden" id="f-express" value="all"><input type="hidden" id="f-currency" value="all">`;
   return `
     <div class="field"><label for="f-express">Bid_Item_Is_Express</label>${selectHtml("f-express", m.express_values, p.express)}</div>
     <div class="field"><label for="f-currency">Currency</label>${selectHtml("f-currency", m.currency_values, p.currency)}</div>`;
@@ -255,14 +301,14 @@ function commonParams(params) {
 function tceField(p) {
   const opts = [...TCE_VALUES.slice().sort((a, b) => (a === "N" ? -1 : b === "N" ? 1 : 0)), "all"]
     .map(v => `<option value="${esc(v)}"${v === p.tce ? " selected" : ""}>${v === "all" ? "(All)" : esc(v)}</option>`).join("");
-  return `<div class="field"><label for="f-tce">TCE_Actual</label><select id="f-tce">${opts}</select></div>`;
+  return `<div class="field"><label for="f-tce">${L.tceCol}</label><select id="f-tce">${opts}</select></div>`;
 }
 const filterQs = p => new URLSearchParams({ express: p.express, currency: p.currency, tce: p.tce }).toString();
 // Texto de la métrica según el filtro TCE_Actual
-const linesLabel = tce => tce === "N" ? "TCE Proximity" : tce === "all" ? "Lines" : `${tce} lines`;
+const linesLabel = tce => tce === "N" ? "TCE Proximity" : tce === "all" ? (isShip() ? "SBBs" : "Lines") : `${tce} ${L.lines}`;
 const linesHint = tce => tce === "N"
-  ? "TCE Proximity = number of lines with TCE_Actual = N in the bid-item."
-  : `Showing the number of lines with TCE_Actual = ${tce === "all" ? "any value" : tce} in each bid-item (TCE Proximity uses N).`;
+  ? `TCE Proximity = number of ${L.lines} with ${L.tceCol} = N in the ${L.item}.`
+  : `Showing the number of ${L.lines} with ${L.tceCol} = ${tce === "all" ? "any value" : tce} in each ${L.item} (TCE Proximity uses N).`;
 
 async function downloadLink(url) {
   loading(true, "Preparing the Excel file…");
@@ -270,19 +316,54 @@ async function downloadLink(url) {
 }
 
 // ---------------------------------------------------------------- archivo CSV (local)
+// Origen de datos (Quotes / Shipments): lo define el archivo abierto (el CSV de shipments se reconoce por sus columnas)
+const TAB_TEXT = {
+  quote: ["2. Quote Detail", "2. Order Detail"], fc: ["3. Proximity by FC", "3. Proximity by SBB"],
+  dependency: ["4. Dependency by FC", "4. Dependency by SBB"], bids: ["5. Bid-Item Ranking", "5. Config Ranking"],
+};
+function drawSource() {
+  const src = state.meta?.source || state.source || "quotes", ship = src === "shipments";
+  state.source = src;
+  $$("#source-seg [data-source]").forEach(b => { b.classList.toggle("on", b.dataset.source === src); b.setAttribute("aria-pressed", String(b.dataset.source === src)); });
+  $("#geo-label").hidden = $("#geo-select").hidden = !(ship && state.meta);
+  if (ship && state.meta) $("#geo-select").innerHTML = SHIP_GEOS.map(g => `<option${g === state.meta.geo ? " selected" : ""}>${esc(g)}</option>`).join("");
+  $$("#tabs a").forEach(a => { const t = TAB_TEXT[a.dataset.view]; if (t) a.textContent = t[ship ? 1 : 0]; });
+}
 async function loadMeta() {
   try {
     state.meta = await api("/api/meta");
     const m = state.meta;
-    $("#meta-line").textContent =
-      `${m.file} · ${fmt(m.rows)} lines · ${fmt(m.quotes)} bids · ${fmt(m.bids)} bid-items (${fmt(m.tce_configs)} full TCE) · ${usdShort(m.value_usd)} · contract start ${m.contract_start_min} → ${m.contract_start_max}`;
+    $("#meta-line").textContent = isShip()
+      ? `Shipments ${m.geo} · ${m.file} · ${fmt(m.rows)} SBB rows · ${fmt(m.quotes)} orders · ${fmt(m.bids)} configs (${fmt(m.tce_configs)} full TCE) · ${usdShort(m.value_usd)} · ship date ${m.contract_start_min} → ${m.contract_start_max}`
+      : `${m.file} · ${fmt(m.rows)} lines · ${fmt(m.quotes)} bids · ${fmt(m.bids)} bid-items (${fmt(m.tce_configs)} full TCE) · ${usdShort(m.value_usd)} · contract start ${m.contract_start_min} → ${m.contract_start_max}`;
     $("#file-name").textContent = m.file;
     drawAdjBanner();
   } catch (e) {
     state.meta = null;
     $("#meta-line").textContent = "No file open";
   }
+  drawSource();
 }
+const afterSourceChange = async () => { state.rankingOpen = {}; state.fcOpen = {}; state.depOpen = {}; await loadMeta(); render(); };
+$$("#source-seg [data-source]").forEach(b => b.addEventListener("click", async () => {
+  const src = b.dataset.source;
+  if (b.classList.contains("on")) return;
+  loading(true, src === "shipments" ? "Loading shipments…" : "Loading quotes…");
+  let done = false;
+  try { done = await localSwitch(src, $("#geo-select").value || undefined); }
+  catch (e) { toast(e.message, true); } finally { loading(false); }
+  if (done) return afterSourceChange();
+  // origen todavía no abierto en esta sesión: reabrir el último archivo de ese origen o elegir uno
+  state.source = src; state.meta = null; drawSource();
+  $("#meta-line").textContent = "No file open";
+  render();
+}));
+$("#geo-select").addEventListener("change", async e => {
+  loading(true, `Loading shipments ${e.target.value}…`);
+  try { await localGeo(e.target.value); toast(`Shipments · ${e.target.value}`); }
+  catch (err) { toast(err.message, true); } finally { loading(false); }
+  afterSourceChange();
+});
 
 async function openCsv(file) {
   if (!file) return;
@@ -320,12 +401,14 @@ document.addEventListener("drop", e => {
 
 // Pantalla inicial: todavía no hay archivo abierto
 async function renderWelcome() {
-  const last = canPickFiles() ? await lastHandle() : null;
+  const ship = (state.source || "quotes") === "shipments";
+  const last = canPickFiles() ? await lastHandle(ship ? "shipments" : "quotes") : null;
   view.innerHTML = `
     <div class="welcome">
-      <h2>Open a quotes data file to start</h2>
-      <p>Choose the LUDP quotes extraction (for example <em>NA Quotes Oct28.xlsx</em>, or a .csv export) or drag and drop it on this page.
-        The first time, a large .xlsx takes up to 1-2 minutes to read; it is then kept in this browser and reopens in seconds.</p>
+      <h2>Open a ${ship ? "shipments" : "quotes"} data file to start</h2>
+      <p>${ship ? `Choose the shipments extraction (.csv of the Magellan query, all geos in one file, for example <em>shipments 2026 oct30.csv</em>)
+        or drag and drop it on this page. It is analysed by SBB; pick the geo (NA, AP, LA, Europe, META) at the top.` : `Choose the LUDP quotes extraction (for example <em>NA Quotes Oct28.xlsx</em>, or a .csv export) or drag and drop it on this page.
+        The first time, a large .xlsx takes up to 1-2 minutes to read; it is then kept in this browser and reopens in seconds.`}</p>
       <div class="welcome-actions">
         ${last ? `<button class="btn primary" id="w-reopen">Reopen ${esc(last.name)}</button>` : ""}
         <button class="btn${last ? "" : " primary"}" id="w-open">Open data file…</button>
@@ -336,7 +419,7 @@ async function renderWelcome() {
   $("#w-open").onclick = chooseCsv;
   if (last) $("#w-reopen").onclick = async () => {
     try {
-      const f = await reopenLast();
+      const f = await reopenLast(ship ? "shipments" : "quotes");
       if (f) await openCsv(f); else toast("Permission to read the file was not granted. Use 'Open data file…'.", true);
     } catch (e) { toast(`Cannot reopen ${last.name}: ${e.message}. Use 'Open data file…'.`, true); }
   };
@@ -350,11 +433,11 @@ async function renderRanking(params) {
   const multi = multiParams(params, ["countries", "forecasts", "statuses"]);
   view.innerHTML = `
     <div class="view-head"><h2>TCE Proximity Classification</h2>
-      <span class="hint">${linesHint(p.tce)} Click a bid-item to see its detail.</span></div>
+      <span class="hint">${linesHint(p.tce)} Click a ${L.item} to see its detail.</span></div>
     <div class="toolbar">
       ${filterFields(p)}
       ${tceField(p)}
-      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="opp, opp status, account, bid, bid-item, product" value="${esc(q)}" size="16"></div>
+      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="${isShip() ? "customer, segment, SO, config, family" : "opp, opp status, account, bid, bid-item, product"}" value="${esc(q)}" size="16"></div>
       ${multiFieldsHtml(multi, true)}
       <div class="spacer"></div>
       <div class="actions">
@@ -398,7 +481,7 @@ function drawRanking(data, prox, q) {
   let shownBids = 0;
   for (const o of data.opps) {
     const key = o.opp_number + "|" + o.account;
-    const noopp = o.opp_number === "(no opp)";
+    const noopp = o.opp_number === "(no opp)" || o.opp_number === L.noOpp;
     const bids = [];
     for (const qq of o.quotes) for (const b of qq.bids)
       if ((!prox || String(b.proximity) === prox) && match(o, qq, b)) bids.push([qq, b]);
@@ -410,12 +493,12 @@ function drawRanking(data, prox, q) {
     // El grupo "(no opp)" no lleva subtítulo (mezcla bids de muchas cuentas; no es relevante)
     const counts = noopp ? "" : bidsSummary(bids);
     const oppValue = bids.reduce((a, [, b]) => a + (b.value_usd || 0), 0);
-    const oppTotal = noopp ? "" : `<div class="opp-total">${counts} · <span title="Sum of the bid-item values shown (USD)">${usdShort(oppValue)}</span></div>`;
+    const oppTotal = noopp ? "" : `<div class="opp-total">${counts} · <span title="Sum of the ${L.item} values shown (USD)">${usdShort(oppValue)}</span></div>`;
     if (!open) {
       rows.push(`<tr class="opp-first collapsed${noopp ? " noopp" : ""}">
         <td class="opp-cell">${toggle}<span class="mono">${esc(o.opp_number)}</span></td><td class="nowrap">${esc(o.forecast)}</td><td>${esc(o.account)}</td>
         <td colspan="3" class="muted">${counts ? counts + " — " : ""}click + to see the detail</td>
-        <td></td><td class="num muted" title="Sum of the bid-item values (USD)">${money(oppValue)}</td></tr>`);
+        <td></td><td class="num muted" title="Sum of the ${L.item} values (USD)">${money(oppValue)}</td></tr>`);
       continue;
     }
     let lastQuote = null;
@@ -435,22 +518,23 @@ function drawRanking(data, prox, q) {
 
   $("#body").innerHTML = `
     <div class="kpis">
-      <div class="kpi"><div class="v">${fmt(s.opps)}</div><div class="l">Opportunities</div></div>
-      <div class="kpi"><div class="v">${fmt(s.quotes)}</div><div class="l">Bids (quotes)</div></div>
+      <div class="kpi"><div class="v">${fmt(s.opps)}</div><div class="l">${L.opps}</div></div>
+      <div class="kpi"><div class="v">${fmt(s.quotes)}</div><div class="l">${L.quotes}</div></div>
+      ${isShip() ? `<div class="kpi"><div class="v">${fmt(s.bids)}</div><div class="l">Configs</div></div>` : `
       <div class="kpi"><div class="v">${fmt(s.bids_with_opp)}</div><div class="l">Bid-items with opp</div></div>
-      <div class="kpi"><div class="v">${fmt(s.bids_without_opp)}</div><div class="l">Bid-items without opp</div></div>
-      <div class="kpi"><div class="v">${fmt(s.distribution["1"] || 0)}</div><div class="l">${data.filters.tce === "N" ? "Bid-items 1 line away from TCE" : "Bid-items with exactly 1 line"}</div></div>
-      <div class="kpi" title="${esc(VALUE_HINT)}"><div class="v">${usdShort(s.value_usd)}</div><div class="l">Value of these bid-items (USD)</div></div>
+      <div class="kpi"><div class="v">${fmt(s.bids_without_opp)}</div><div class="l">Bid-items without opp</div></div>`}
+      <div class="kpi"><div class="v">${fmt(s.distribution["1"] || 0)}</div><div class="l">${data.filters.tce === "N" ? `${L.Items} 1 ${L.line} away from TCE` : `${L.Items} with exactly 1 ${L.line}`}</div></div>
+      <div class="kpi" title="${esc(L.valueHint)}"><div class="v">${usdShort(s.value_usd)}</div><div class="l">Value of these ${L.items} (USD)</div></div>
     </div>
     <div class="toolbar"><div class="chips"><span class="muted">Filter by proximity:</span>
       <button class="chip${!prox ? " on" : ""}" data-prox="">All<span class="n">${fmt(s.bids)}</span></button>${chips}</div></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>opp_number</th><th>forecast_category_name</th><th>opportunities_parentaccountidname</th><th>quotenumber</th><th>Bid_Item</th>
-        <th>quotelines_productcategoryname_3</th><th class="num">${linesLabel(data.filters.tce || "all")}</th>
-        <th class="num" title="${esc(VALUE_HINT)}">Bid Item Price (USD)</th></tr></thead>
+      <thead><tr><th>${L.oppCol}</th><th>${L.oppStatusCol}</th><th>${L.accountCol}</th><th>${L.quoteCol}</th><th>${L.itemCol}</th>
+        <th>${L.productCol}</th><th class="num">${linesLabel(data.filters.tce || "all")}</th>
+        <th class="num" title="${esc(L.valueHint)}">${L.value}</th></tr></thead>
       <tbody>${rows.join("") || `<tr><td colspan="8" class="empty">No results</td></tr>`}</tbody>
     </table></div>
-    <div class="count">${fmt(shownBids)} bid-items shown</div>`;
+    <div class="count">${fmt(shownBids)} ${L.items} shown</div>`;
 
   $$(".toggle", $("#body")).forEach(btn => btn.onclick = () => {
     const k = btn.dataset.key;
@@ -466,7 +550,7 @@ function drawRanking(data, prox, q) {
 }
 
 // ------------------------------------------------------- 2. Detalle quote
-const DETAIL_COLS = [
+const DETAIL_COLS_Q = [
   { key: "item", label: "Bid_Item", cls: "mono" },
   { key: "bid_pn", label: "bid_PN", cls: "mono" },
   { key: "product", label: "quotelines_productcategoryname_3" },
@@ -482,22 +566,40 @@ const DETAIL_COLS = [
   { key: "rev_contrib_usd", label: "FC rev contrib (USD)", usd: true,
     title: "Revenue contribution of the feature code: sum of the USD value of every configuration in the file that includes it (TCE or not)." },
 ];
+// shipments: sin Express; SBB con sus FC(s) y basicname de referencia
+const DETAIL_COLS_S = [
+  { key: "item", label: "mfgsoline", cls: "mono" },
+  { key: "bid_pn", label: "mtm", cls: "mono" },
+  { key: "product", label: "family" },
+  { key: "featurecode", label: "sbb", cls: "mono" },
+  { key: "description", label: "productid_des" },
+  { key: "ref_fc", label: "fc", cls: "mono" },
+  { key: "basicname", label: "basicname" },
+  { key: "quotelines_quantity", label: "qty", qty: true },
+  { key: "N", label: "N", num: true },
+  { key: "Y", label: "Y", num: true },
+  { key: "Not Mapped", label: "Not Mapped", num: true },
+  { key: "rev_contrib_usd", label: "SBB rev contrib (USD)", usd: true,
+    title: "Revenue contribution of the SBB: sum of the USD value of every configuration of this geo that includes it (TCE or not)." },
+];
 
 async function renderQuote(quote, params) {
   const bid = params.get("bid") || "";
+  const DETAIL_COLS = isShip() ? DETAIL_COLS_S : DETAIL_COLS_Q;
+  const nBefore = DETAIL_COLS.findIndex(c => c.key === "N");   // columnas antes del grupo TCE
   view.innerHTML = `
-    <div class="view-head"><h2>Quote Detail</h2>
-      <span class="hint">Sum of quantity by FC and TCE_Actual. Rows in red have N lines (they block TCE).</span></div>
+    <div class="view-head"><h2>${isShip() ? "Order Detail" : "Quote Detail"}</h2>
+      <span class="hint">Sum of ${L.qtyName} by ${L.code} and ${L.tceCol}. Rows in red have N ${L.lines} (they block TCE).</span></div>
     <div class="toolbar quote-bar">
-      <div class="field"><label for="q-input">quotenumber</label>
-        <input type="text" id="q-input" list="q-list" value="${esc(quote)}" placeholder="paste the quote number here" autocomplete="off"></div>
+      <div class="field"><label for="q-input">${L.quoteCol}</label>
+        <input type="text" id="q-input" list="q-list" value="${esc(quote)}" placeholder="paste the ${isShip() ? "SO" : "quote"} number here" autocomplete="off"></div>
       <datalist id="q-list"></datalist>
       <button class="btn primary" id="q-go">View</button>
       <div class="spacer"></div>
       <div class="actions"><a class="btn" href="#/ranking">← Back to classification</a>
         ${quote ? `<button class="btn" id="q-export">Export to Excel</button>` : ""}</div>
     </div>
-    <div id="body">${quote ? `<div class="empty">Loading…</div>` : `<div class="empty">Enter a quote number or pick a bid-item from the classification.</div>`}</div>`;
+    <div id="body">${quote ? `<div class="empty">Loading…</div>` : `<div class="empty">Enter ${isShip() ? "an SO" : "a quote"} number or pick a ${L.item} from the classification.</div>`}</div>`;
 
   const go = () => { const v = $("#q-input").value.trim(); if (v) setHash("quote", v, {}); };
   $("#q-go").onclick = go;
@@ -522,24 +624,29 @@ async function renderQuote(quote, params) {
 
   const h = data.header;
   const hv = (k, v, big) => `<div class="${big ? "big" : ""}"><div class="k">${k}</div><div class="v">${esc(v || "—")}</div></div>`;
-  $("#body").innerHTML = `
-    <div class="header-grid">
+  const headerHtml = isShip() ? `
+      ${hv("Order (SO)", data.quote, true)}${hv("Customer number", h.opp_number, true)}${hv("Customer", h.account, true)}
+      ${hv("Segment", h.forecast)}${hv("Ship status", h.status)}${hv("Country", h.country)}
+      ${hv("Ship date", h.contract_start)}${hv("Order date", h.created)}${hv("Order type · plant", `${h.quotetype} · ${h.fulfillment}`)}
+      ${hv("SO value (USD)", h.value_usd == null ? "" : "$" + money(h.value_usd))}${hv("Order TCE flag (tce)", h.order_tce)}${hv("CTO", h.cto)}` : `
       ${hv("Quote", data.quote, true)}${hv("Opportunity", h.opp_number, true)}${hv("Account", h.account, true)}
       ${hv("Forecast", h.forecast === "" ? "" : h.forecast)}${hv("Sales rep", h.sales_rep)}${hv("Status", h.status)}
       ${hv("Country / currency", `${h.country} · ${h.currency}`)}${hv("Contract start", h.contract_start)}
       ${hv("Created", h.created)}${hv("Type", `${h.quotetype} · ${h.fulfillment}`)}
       ${hv("Total quote (final price)", `${money(h.total_final_price)} ${h.currency}`)}${hv("Quote value (USD)", h.value_usd == null ? "" : "$" + money(h.value_usd))}
-      ${hv("End customer", h.end_customer)}
+      ${hv("End customer", h.end_customer)}`;
+  $("#body").innerHTML = `
+    <div class="header-grid">${headerHtml}
     </div>
     <div class="toolbar">
       <div class="chips bidchips" id="bidchips"></div>
       <div class="spacer"></div>
-      <label class="chips"><input type="checkbox" id="only-n"> Only lines with N</label>
+      <label class="chips"><input type="checkbox" id="only-n"> Only ${L.lines} with N</label>
       <button class="btn" id="clear-f">Clear filters</button>
     </div>
     <div class="table-wrap"><table>
       <thead>
-        <tr><th colspan="7"></th><th colspan="3" class="group">TCE</th><th></th></tr>
+        <tr><th colspan="${nBefore}"></th><th colspan="3" class="group">TCE</th><th></th></tr>
         <tr>${DETAIL_COLS.map(c => `<th class="${c.num || c.qty || c.usd ? "num" : ""}"${c.title ? ` title="${esc(c.title)}"` : ""}>${c.label}</th>`).join("")}</tr>
         <tr class="filters">${DETAIL_COLS.map(c => c.usd ? "<th></th>" : c.num
           ? `<th><select data-f="${c.key}" aria-label="Filter ${c.label}"><option value="">all</option><option value="gt0">&gt; 0</option><option value="eq0">= 0</option></select></th>`
@@ -551,10 +658,10 @@ async function renderQuote(quote, params) {
     <div class="count" id="d-count"></div>`;
 
   const drawChips = () => {
-    $("#bidchips").innerHTML = `<span class="muted">Bid-item:</span>
-      <button class="chip${!st.bid ? " on" : ""}" data-bid="">Whole quote<span class="n">${data.bids.length} bid-item${data.bids.length === 1 ? "" : "s"}</span></button>` +
+    $("#bidchips").innerHTML = `<span class="muted">${L.Item}:</span>
+      <button class="chip${!st.bid ? " on" : ""}" data-bid="">Whole ${L.quoteLow}<span class="n">${data.bids.length} ${data.bids.length === 1 ? L.item : L.items}</span></button>` +
       data.bids.map(b => `<button class="chip${st.bid === b.bid_item ? " on" : ""}" data-bid="${esc(b.bid_item)}"
-        title="${esc(b.product)} · ${esc(b.bid_pn)} · Express ${esc(b.express)} · value ${b.value_usd == null ? "n/a" : "$" + money(b.value_usd)} USD">${esc(b.item)} · ${esc(b.product)}<span class="n">prox ${b.proximity}${b.value_usd == null ? "" : " · " + usdShort(b.value_usd)}</span></button>`).join("");
+        title="${esc(b.product)} · ${esc(b.bid_pn)}${isShip() ? "" : " · Express " + esc(b.express)} · value ${b.value_usd == null ? "n/a" : "$" + money(b.value_usd)} USD">${esc(b.item)} · ${esc(b.product)}<span class="n">prox ${b.proximity}${b.value_usd == null ? "" : " · " + usdShort(b.value_usd)}</span></button>`).join("");
     $$(".chip", $("#bidchips")).forEach(c => c.onclick = () => {
       st.bid = c.dataset.bid;
       setHash("quote", quote, { bid: st.bid }, true);
@@ -593,7 +700,7 @@ async function renderQuote(quote, params) {
       || `<tr><td colspan="${DETAIL_COLS.length}" class="empty">No rows match these filters</td></tr>`;
     const sum = k => rows.reduce((a, r) => a + (r[k] || 0), 0);
     const nLines = rows.filter(r => r.N > 0).length;
-    $("#d-foot").innerHTML = `<td colspan="6">Total (${fmt(rows.length)} rows · ${nLines} FC in N)</td><td></td>
+    $("#d-foot").innerHTML = `<td colspan="${nBefore - 1}">Total (${fmt(rows.length)} rows · ${nLines} ${L.code} in N)</td><td></td>
       <td class="num">${fmt(sum("N"))}</td><td class="num">${fmt(sum("Y"))}</td><td class="num">${fmt(sum("Not Mapped"))}</td><td></td>`;
     $("#d-count").textContent = `${fmt(rows.length)} of ${fmt(data.rows.length)} rows`;
   };
@@ -612,8 +719,8 @@ async function renderFc(params) {
   const proxSel = (params.get("prox") ?? "1").split("|").filter(x => x && x !== "all");
   const p = commonParams(params);
   view.innerHTML = `
-    <div class="view-head"><h2>TCE Proximity - Top Feature Code Detractors to be TCE Config</h2>
-      <span class="hint">Configs = bid-items that meet the criteria. Click an FC to see the affected bid-items.</span></div>
+    <div class="view-head"><h2>TCE Proximity - Top ${isShip() ? "SBB" : "Feature Code"} Detractors to be TCE Config</h2>
+      <span class="hint">Configs = ${L.items} that meet the criteria. Click ${isShip() ? "an SBB" : "an FC"} to see the affected ${L.items}.</span></div>
     <div class="toolbar">
       <div class="ms-group inline"><div class="field"><label for="f-prox">TCE Proximity</label><div id="f-prox-box"></div></div>
         <div class="sel-chips" id="sel-prox">${proxSel.map(selChipHtml).join("")}</div></div>
@@ -651,8 +758,8 @@ async function renderFc(params) {
     const rows = list.map(r => {
       const pct = data.configs_in_scope ? (100 * r.configs / data.configs_in_scope) : 0;
       let html = `<tr class="fc-row" data-fc="${esc(r.featurecode)}">
-        <td><button class="toggle" tabindex="-1">${open[r.featurecode] ? "−" : "+"}</button><span class="mono">${esc(r.featurecode)}</span></td>
-        <td>${esc(r.description)}</td>
+        <td class="nowrap"><button class="toggle" tabindex="-1">${open[r.featurecode] ? "−" : "+"}</button><span class="mono">${esc(r.featurecode)}</span></td>
+        <td>${esc(r.description)}</td>${refTd(r)}
         <td class="num">${fmt(r.configs)}</td>
         <td class="num muted">${pct.toFixed(1)}%</td>
         <td><div class="bar"><span style="width:${(100 * r.configs / max).toFixed(1)}%"></span></div></td>
@@ -661,7 +768,7 @@ async function renderFc(params) {
         <td class="num muted">${r.rev_rank}</td>
         <td class="num">${usdM(r.value_in_scope_usd)}</td></tr>`;
       if (open[r.featurecode]) {
-        html += `<tr class="fc-detail"><td colspan="9"><table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">TCE Proximity</th><th class="num">Bid Item Price (USD)</th></tr></thead><tbody>
+        html += `<tr class="fc-detail"><td colspan="${9 + refN()}"><table><thead><tr><th>${L.itemCol}</th><th>${L.quoteCol}</th><th>${L.oppCol}</th><th>${L.account}</th><th>${L.product}</th><th class="num">TCE Proximity</th><th class="num">${L.value}</th></tr></thead><tbody>
           ${r.bids.map(b => `<tr><td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
             <td class="mono">${esc(b.quotenumber)}</td><td class="mono">${esc(b.opp_number)}</td><td>${esc(b.account)}</td><td>${esc(b.product)}</td><td class="num">${proxBadge(b.proximity)}</td><td class="num">${money(b.value_usd)}</td></tr>`).join("")}
           </tbody></table></td></tr>`;
@@ -671,17 +778,17 @@ async function renderFc(params) {
     $("#body").innerHTML = `
       <div class="kpis">
         <div class="kpi"><div class="v">${fmt(data.configs_in_scope)}</div><div class="l">Configs in scope</div></div>
-        <div class="kpi"><div class="v">${fmt(data.lines_in_scope)}</div><div class="l">TCE=N lines in scope</div></div>
-        <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct feature codes</div></div>
-        <div class="kpi" title="${esc(VALUE_HINT)}"><div class="v">${usdShort(data.value_in_scope_usd)}</div><div class="l">Value of configs in scope (USD)</div></div>
+        <div class="kpi"><div class="v">${fmt(data.lines_in_scope)}</div><div class="l">TCE=N ${L.lines} in scope</div></div>
+        <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct ${L.codes}</div></div>
+        <div class="kpi" title="${esc(L.valueHint)}"><div class="v">${usdShort(data.value_in_scope_usd)}</div><div class="l">Value of configs in scope (USD)</div></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr>${sortTh("FC", "featurecode", st)}${sortTh("Description", "description", st)}${sortTh("Nbr of Configs", "configs", st, "num")}${sortTh("% configs", "configs", st, "num")}<th></th>
-          ${sortTh("Rev Contrib (USD)", "rev_contrib_usd", st, "num", "Revenue contribution: USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution of the query)")}
-          ${sortTh("% Rev", "rev_pct", st, "num", "Share of the Rev Contrib of the listed FCs")}
+        <thead><tr>${sortTh(L.code, "featurecode", st)}${sortTh("Description", "description", st)}${refTh(st)}${sortTh("Nbr of Configs", "configs", st, "num")}${sortTh("% configs", "configs", st, "num")}<th></th>
+          ${sortTh("Rev Contrib (USD)", "rev_contrib_usd", st, "num", `Revenue contribution: USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution of the query)`)}
+          ${sortTh("% Rev", "rev_pct", st, "num", `Share of the Rev Contrib of the listed ${L.codes}`)}
           ${sortTh("Rank Rev", "rev_rank", st, "num", "Rank by Rev Contrib")}
-          ${sortTh("Value of configs in scope (USD)", "value_in_scope_usd", st, "num", "USD value of the configs in scope that this FC blocks (what would become TCE if the FC were mapped)")}</tr></thead>
-        <tbody>${rows || `<tr><td colspan="9" class="empty">No configs match these criteria</td></tr>`}</tbody>
+          ${sortTh("Value of configs in scope (USD)", "value_in_scope_usd", st, "num", `USD value of the configs in scope that this ${L.code} blocks (what would become TCE if the ${L.code} were mapped)`)}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${9 + refN()}" class="empty">No configs match these criteria</td></tr>`}</tbody>
       </table></div>`;
     $$("tr.fc-row", $("#body")).forEach(tr => tr.onclick = e => {
       if (e.target.closest("a")) return;
@@ -697,9 +804,9 @@ async function renderDependency(params) {
   const multi = multiParams(params, ["products"]);
   const p = commonParams(params);
   view.innerHTML = `
-    <div class="view-head"><h2>TCE Dependency - Feature Codes Most Relied On by TCE Configs</h2>
-      <span class="hint">Feature codes (TCE_Actual = Y) present in the configurations that are fully TCE (TCE Proximity = 0).
-        Changing one of them to N would take those configs out of TCE. Click an FC to see its TCE configs.</span></div>
+    <div class="view-head"><h2>TCE Dependency - ${isShip() ? "SBBs" : "Feature Codes"} Most Relied On by TCE Configs</h2>
+      <span class="hint">${isShip() ? "SBBs (sbb_tce_flag" : "Feature codes (TCE_Actual"} = Y) present in the configurations that are fully TCE (TCE Proximity = 0).
+        Changing one of them to N would take those configs out of TCE. Click ${isShip() ? "an SBB" : "an FC"} to see its TCE configs.</span></div>
     <div class="toolbar">
       ${filterFields(p)}
       ${multiFieldsHtml(multi)}
@@ -727,8 +834,8 @@ async function renderDependency(params) {
     const shown = showAll ? list : list.slice(0, LIMIT);
     const rows = shown.map(r => {
       let html = `<tr class="fc-row" data-fc="${esc(r.featurecode)}">
-        <td><button class="toggle" tabindex="-1">${open[r.featurecode] ? "−" : "+"}</button><span class="mono">${esc(r.featurecode)}</span></td>
-        <td>${esc(r.description)}</td>
+        <td class="nowrap"><button class="toggle" tabindex="-1">${open[r.featurecode] ? "−" : "+"}</button><span class="mono">${esc(r.featurecode)}</span></td>
+        <td>${esc(r.description)}</td>${refTd(r)}
         <td class="num">${fmt(r.configs)}</td>
         <td class="num muted">${pctFmt(r.pct)}</td>
         <td><div class="bar"><span style="width:${(100 * r.configs / max).toFixed(1)}%"></span></div></td>
@@ -738,7 +845,7 @@ async function renderDependency(params) {
         <td class="num muted">${r.rev_tce_rank}</td></tr>`;
       if (open[r.featurecode]) {
         const c = configs[r.featurecode];
-        html += `<tr class="fc-detail"><td colspan="9">${!c ? `<div class="empty">Loading…</div>` : `<table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">Bid Item Price (USD)</th></tr></thead><tbody>
+        html += `<tr class="fc-detail"><td colspan="${9 + refN()}">${!c ? `<div class="empty">Loading…</div>` : `<table><thead><tr><th>${L.itemCol}</th><th>${L.quoteCol}</th><th>${L.oppCol}</th><th>${L.account}</th><th>${L.product}</th><th class="num">${L.value}</th></tr></thead><tbody>
           ${c.slice(0, 500).map(b => `<tr><td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
             <td class="mono">${esc(b.quotenumber)}</td><td class="mono">${esc(b.opp_number)}</td><td>${esc(b.account)}</td><td>${esc(b.product)}</td><td class="num">${money(b.value_usd)}</td></tr>`).join("")}
           </tbody></table>${c.length > 500 ? `<div class="count">Showing the 500 highest-value of ${fmt(c.length)} TCE configs.</div>` : ""}`}</td></tr>`;
@@ -748,19 +855,19 @@ async function renderDependency(params) {
     $("#body").innerHTML = `
       <div class="kpis">
         <div class="kpi"><div class="v">${fmt(data.tce_configs_in_scope)}</div><div class="l">TCE configs in scope</div></div>
-        <div class="kpi"><div class="v">${fmt(data.tce_lines_in_scope)}</div><div class="l">TCE=Y lines in scope</div></div>
-        <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct feature codes</div></div>
-        <div class="kpi" title="${esc(VALUE_HINT)}"><div class="v">${usdShort(data.tce_value_in_scope_usd)}</div><div class="l">Value of TCE configs (USD)</div></div>
+        <div class="kpi"><div class="v">${fmt(data.tce_lines_in_scope)}</div><div class="l">TCE=Y ${L.lines} in scope</div></div>
+        <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct ${L.codes}</div></div>
+        <div class="kpi" title="${esc(L.valueHint)}"><div class="v">${usdShort(data.tce_value_in_scope_usd)}</div><div class="l">Value of TCE configs (USD)</div></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr>${sortTh("FC", "featurecode", st)}${sortTh("Description", "description", st)}${sortTh("Nbr of TCE Configs", "configs", st, "num")}${sortTh("% of TCE configs", "pct", st, "num")}<th></th>
-          ${sortTh("Rev Contrib All Configs (USD)", "rev_all_usd", st, "num", "USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution)")}
-          ${sortTh("Rev Contrib TCE Sel (USD)", "rev_tce_usd", st, "num", "USD value of the fully TCE configurations with this FC (Revenue_Contribution_TCE_Sel)")}
-          ${sortTh("TCE Sel / All", "tce_share", st, "num", "Share of the FC's revenue that already sits in TCE configs")}
+        <thead><tr>${sortTh(L.code, "featurecode", st)}${sortTh("Description", "description", st)}${refTh(st)}${sortTh("Nbr of TCE Configs", "configs", st, "num")}${sortTh("% of TCE configs", "pct", st, "num")}<th></th>
+          ${sortTh("Rev Contrib All Configs (USD)", "rev_all_usd", st, "num", `USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution)`)}
+          ${sortTh("Rev Contrib TCE Sel (USD)", "rev_tce_usd", st, "num", `USD value of the fully TCE configurations with this ${L.code} (Revenue_Contribution_TCE_Sel)`)}
+          ${sortTh("TCE Sel / All", "tce_share", st, "num", `Share of the ${L.code}'s revenue that already sits in TCE configs`)}
           ${sortTh("Rank Rev", "rev_tce_rank", st, "num", "Rank by Rev Contrib TCE Sel")}</tr></thead>
-        <tbody>${rows || `<tr><td colspan="9" class="empty">No TCE configs match these filters</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="${9 + refN()}" class="empty">No TCE configs match these filters</td></tr>`}</tbody>
       </table></div>
-      <div class="count">${fmt(shown.length)} of ${fmt(list.length)} feature codes${list.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
+      <div class="count">${fmt(shown.length)} of ${fmt(list.length)} ${L.codes}${list.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
     $$("tr.fc-row", $("#body")).forEach(tr => tr.onclick = async e => {
       if (e.target.closest("a")) return;
       const fc = tr.dataset.fc;
@@ -782,9 +889,10 @@ async function renderWw(params) {
   const proxSel = (params.get("prox") ?? "1").split("|").filter(x => x && x !== "all");
   const part = params.get("part") === "dependency" ? "dependency" : "proximity";
   view.innerHTML = `
-    <div class="view-head"><h2>WW Ranking - ${part === "proximity" ? "TCE Proximity Detractors" : "TCE Dependency"} across NA / AP / LA / EMEA</h2>
-      <span class="hint">Same as the "TCE Proximity WW Detractors Ranking" workbook: the most recent data file of each geo you choose,
-        Express = All, Currency = All, values in USD. WW = sum of the geos (they are disjoint).</span></div>
+    <div class="view-head"><h2>WW Ranking - ${part === "proximity" ? "TCE Proximity Detractors" : "TCE Dependency"}${isShip() ? " by SBB (Shipments) across NA / AP / LA / Europe / META" : " across NA / AP / LA / EMEA"}</h2>
+      <span class="hint">${isShip() ? `Same as the "WW SBB Proximity" / "WW SBB Dependency" sheets: the 5 geos of the shipments file
+        (Europe + META = EMEA of quotes; PRC excluded), values in USD. WW = sum of the geos (they are disjoint).` : `Same as the "TCE Proximity WW Detractors Ranking" workbook: the most recent data file of each geo you choose,
+        Express = All, Currency = All, values in USD. WW = sum of the geos (they are disjoint).`}</span></div>
     <div class="toolbar">
       <div class="chips"><button class="chip${part === "proximity" ? " on" : ""}" data-part="proximity">Proximity (detractors)</button>
         <button class="chip${part === "dependency" ? " on" : ""}" data-part="dependency">Dependency (TCE configs)</button></div>
@@ -840,7 +948,7 @@ async function renderWw(params) {
     if (e.status === 428) return wwChoose("");
     $("#body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return;
   }
-  const changeFiles = `<button class="btn small" id="ww-change">Change geo files…</button>`;
+  const changeFiles = isShip() ? "" : `<button class="btn small" id="ww-change">Change geo files…</button>`;
   const geos = data.geos;
   const d = data[part];
   d.rows.forEach((x, i) => { x._rank = i + 1; });   // rank WW (orden del Excel), se mantiene al reordenar
@@ -849,33 +957,35 @@ async function renderWw(params) {
   const getWw = (r, k) => { const v = pathGet(r, k); return v === undefined && k.includes(".") ? 0 : v; };
   const LIMIT = 300;
   let showAll = false;
-  const sources = geos.map(g => `<span class="sel-chip" title="${esc(data.files[g])}">${esc(g)}: ${esc(data.files[g])}</span>`).join("")
+  const sources = (isShip() ? (geos.length ? `<span class="sel-chip" title="${esc(data.files[geos[0]])}">All geos: ${esc(data.files[geos[0]])}</span>` : "")
+    : geos.map(g => `<span class="sel-chip" title="${esc(data.files[g])}">${esc(g)}: ${esc(data.files[g])}</span>`).join(""))
     + (data.missing_geos.length ? ` <span class="muted">No file for ${esc(data.missing_geos.join(", "))}</span>` : "");
   const draw = () => {
     const list = sortRows(d.rows, st, getWw);
     const shown = showAll ? list : list.slice(0, LIMIT);
-    const th = (label, key, title = "") => sortTh(label, key, st, key === "featurecode" || key === "description" ? "" : "num", title);
+    const th = (label, key, title = "") => sortTh(label, key, st, ["featurecode", "description", "ref_fc", "basicname"].includes(key) ? "" : "num", title);
+    const refH = isShip() ? th("FC(s)", "ref_fc", "Feature codes of the SBB (fc column)") + th("Basic name", "basicname") : "";
     let head, body;
     if (part === "proximity") {
-      head = `<tr><th colspan="3"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th></tr>
-        <tr>${th("Rank", "_rank")}${th("FC", "featurecode")}${th("Description", "description")}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th></tr>
+        <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}${th("Cum. %", "cum_pct", "Cumulative % in the WW ranking order")}
         ${th("Rev Contrib WW", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}</tr>`;
-      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
-        <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td><td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
+      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
+        <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td><td class="num muted">${pctFmt(x.cum_pct)}</td>
         <td class="num"><strong>${usdM(x.rev_contrib_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_contrib_usd[g] ? "" : " zero"}">${usdM(x.rev_contrib_usd[g] || 0)}</td>`).join("")}
         <td class="num muted">${pctFmt(x.rev_pct)}</td><td class="num muted">${x.rev_rank}</td></tr>`).join("");
     } else {
-      head = `<tr><th colspan="3"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th></tr>
-        <tr>${th("Rank", "_rank")}${th("FC", "featurecode")}${th("Description", "description")}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th></tr>
+        <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}
         ${th("All WW", "rev_all_usd_ww")}${geos.map(g => th(esc(g), "rev_all_usd." + g)).join("")}
         ${th("TCE Sel WW", "rev_tce_usd_ww")}${geos.map(g => th(esc(g), "rev_tce_usd." + g)).join("")}
         ${th("TCE Sel / All", "tce_share")}${th("Rank Rev", "rev_tce_rank")}</tr>`;
-      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
-        <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td><td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
+      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
+        <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td>
         <td class="num"><strong>${usdM(x.rev_all_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_all_usd[g] ? "" : " zero"}">${usdM(x.rev_all_usd[g] || 0)}</td>`).join("")}
@@ -886,12 +996,12 @@ async function renderWw(params) {
       <div class="kpis">
         <div class="kpi"><div class="v">${fmt(d.configs_ww)}</div><div class="l">${part === "proximity" ? "Configs in scope (WW)" : "TCE configs in scope (WW)"}</div></div>
         ${geos.map(g => `<div class="kpi"><div class="v">${fmt(d.configs_by_geo[g])}</div><div class="l">${esc(g)}</div></div>`).join("")}
-        <div class="kpi"><div class="v">${fmt(d.rows.length)}</div><div class="l">Distinct feature codes</div></div>
+        <div class="kpi"><div class="v">${fmt(d.rows.length)}</div><div class="l">Distinct ${L.codes}</div></div>
       </div>
       <div class="toolbar"><div class="sel-chips">${sources}</div><div class="spacer"></div>${changeFiles}</div>
       <div class="table-wrap"><table class="one-line"><thead>${head}</thead>
-        <tbody>${body || `<tr><td colspan="20" class="empty">No feature codes</td></tr>`}</tbody></table></div>
-      <div class="count">${fmt(shown.length)} of ${fmt(d.rows.length)} feature codes${d.rows.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
+        <tbody>${body || `<tr><td colspan="20" class="empty">No ${L.codes}</td></tr>`}</tbody></table></div>
+      <div class="count">${fmt(shown.length)} of ${fmt(d.rows.length)} ${L.codes}${d.rows.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
     wireSort($("#body"), st, d.rows, draw, getWw);
     $("#show-all")?.addEventListener("click", e => { e.preventDefault(); showAll = true; draw(); });
     $("#ww-change")?.addEventListener("click", () => wwChoose(""));
@@ -900,7 +1010,7 @@ async function renderWw(params) {
 }
 
 // ------------------------------------------------------- 4. Ranking de bids
-const BID_COLS = [
+const BID_COLS_Q = [
   { key: "rank", label: "#", num: true },
   { key: "proximity", label: "TCE Proximity", num: true },
   { key: "bid_item", label: "Bid_Item", cls: "mono" },
@@ -914,23 +1024,33 @@ const BID_COLS = [
   { key: "contract_start", label: "Contract start" },
   { key: "quotelines_quantity", label: "quotelines_quantity", num: true },
   { key: "tot_lines_qty", label: "tot_lines_qty", num: true },
-  { key: "value_usd", label: "Bid Item Price (USD)", num: true, title: VALUE_HINT },
+  { key: "value_usd", label: "Bid Item Price (USD)", num: true, title: L.valueHint },
   { key: "total_final_price", label: "Total quote (final price)", num: true, title: "totalfinalprice: total of the whole quote, in the quote currency" },
 ];
+// shipments: mismas columnas con sus nombres (sin sales rep)
+const BID_COLS_S = BID_COLS_Q.filter(c => c.key !== "sales_rep").map(c => ({ ...c, ...({
+  bid_item: { label: "mfgsoline" }, quotenumber: { label: "so" }, opp_number: { label: "end_customer_number" },
+  account: { label: "Customer" }, product: { label: "Family" }, forecast: { label: "Segment" },
+  contract_start: { label: "Ship date" }, quotelines_quantity: { label: "qty" },
+  tot_lines_qty: { label: "SO qty", title: "Sum of qty of all configs of the SO" },
+  value_usd: { label: "Config value (USD)", title: LABELS.shipments.valueHint },
+  total_final_price: { label: "SO value (USD)", title: "Sum of the config values of the SO" },
+}[c.key] || {}) }));
 
 async function renderBids(params) {
   const p = commonParams(params);
-  const multi = multiParams(params, ["products", "countries", "forecasts"]);
+  const multi = multiParams(params, isShip() ? ["products", "countries", "forecasts", "statuses"] : ["products", "countries", "forecasts"]);
+  const BID_COLS = isShip() ? BID_COLS_S : BID_COLS_Q;
   view.innerHTML = `
-    <div class="view-head"><h2>Bid-Item Ranking</h2>
-      <span class="hint">${p.tce === "N" ? "All bid-items with at least one N line, from closest to farthest from TCE." : linesHint(p.tce)} Click a header to sort.</span></div>
+    <div class="view-head"><h2>${isShip() ? "Config Ranking" : "Bid-Item Ranking"}</h2>
+      <span class="hint">${p.tce === "N" ? `All ${L.items} with at least one N ${L.line}, from closest to farthest from TCE.` : linesHint(p.tce)} Click a header to sort.</span></div>
     <div class="toolbar">
       ${filterFields(p)}
       ${tceField(p)}
-      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="bid-item, bid, opp, account, rep…" size="16"></div>
+      <div class="field"><label for="f-q">Search</label><input type="search" id="f-q" placeholder="${isShip() ? "config, SO, customer, family…" : "bid-item, bid, opp, account, rep…"}" size="16"></div>
       <div class="ms-group inline"><div class="field"><label for="f-prox">Proximity</label><div id="f-prox-box"></div></div>
         <div class="sel-chips" id="sel-prox"></div></div>
-      <div class="field"><label for="f-opp">Opportunity</label><select id="f-opp"><option value="">(All)</option><option value="with">With opp</option><option value="without">Without opp</option></select></div>
+      <div class="field"${isShip() ? " hidden" : ""}><label for="f-opp">Opportunity</label><select id="f-opp"><option value="">(All)</option><option value="with">With opp</option><option value="without">Without opp</option></select></div>
       ${multiFieldsHtml(multi, true)}
       <div class="spacer"></div>
       <div class="actions"><button class="btn primary" id="export">Export to Excel</button></div>
@@ -984,10 +1104,10 @@ async function renderBids(params) {
           <td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
           <td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}">${esc(b.quotenumber)}</a></td>
           <td class="mono">${esc(b.opp_number)}</td><td class="trunc" title="${esc(b.account)}">${esc(b.account)}</td><td class="trunc" title="${esc(b.product)}">${esc(b.product)}</td>
-          <td>${esc(b.forecast)}</td><td class="trunc" title="${esc(b.sales_rep)}">${esc(b.sales_rep)}</td><td>${esc(b.country)}</td><td>${esc(b.contract_start)}</td>
-          <td class="num">${fmt(b.quotelines_quantity)}</td><td class="num" title="Sum of quotelines_quantity of all bid-items in the bid">${fmt(b.tot_lines_qty)}</td><td class="num">${money(b.value_usd)}</td><td class="num muted">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
+          <td>${esc(b.forecast)}</td>${isShip() ? "" : `<td class="trunc" title="${esc(b.sales_rep)}">${esc(b.sales_rep)}</td>`}<td>${esc(b.country)}</td><td>${esc(b.contract_start)}</td>
+          <td class="num">${fmt(b.quotelines_quantity)}</td><td class="num" title="Sum of ${L.qtyCol} of all ${L.items} in the ${L.bidWord}">${fmt(b.tot_lines_qty)}</td><td class="num">${money(b.value_usd)}</td><td class="num muted">${money(b.total_final_price)}</td></tr>`).join("") || `<tr><td colspan="${BID_COLS.length}" class="empty">No results</td></tr>`}</tbody>
       </table></div>
-      <div class="count">${fmt(rows.length)} of ${fmt(data.length)} bid-items${rows.length > shown.length ? " (showing the first 2,000; use the filters or export)" : ""}</div>`;
+      <div class="count">${fmt(rows.length)} of ${fmt(data.length)} ${L.items}${rows.length > shown.length ? " (showing the first 2,000; use the filters or export)" : ""}</div>`;
     $$("th.sortable", $("#body")).forEach(th => th.onclick = () => {
       if (st.sort === th.dataset.sortKey) st.dir *= -1; else { st.sort = th.dataset.sortKey; st.dir = BID_COLS.find(c => c.key === st.sort)?.num ? -1 : 1; }
       draw();
@@ -1003,10 +1123,10 @@ async function renderBids(params) {
 async function renderAdjustments(fc) {
   view.innerHTML = `
     <div class="view-head"><h2>Adjustments</h2>
-      <span class="hint">Look up a feature code and override its TCE value. The data file is not modified; adjustments are saved and applied to every view. An adjustment is removed automatically when a newer data file brings a different source value for that FC.</span></div>
+      <span class="hint">Look up ${isShip() ? "an SBB" : "a feature code"} and override its TCE value. The data file is not modified; adjustments are saved and applied to every view${isShip() ? " (shipments adjustments are kept apart from the quotes ones)" : ""}. An adjustment is removed automatically when a newer data file brings a different source value for that ${L.code}.</span></div>
     <div class="toolbar">
-      <div class="field"><label for="fc-input">Feature code or description</label>
-        <input type="search" id="fc-input" placeholder="e.g. B0ML or TPM" value="${esc(fc)}" size="34" autocomplete="off"></div>
+      <div class="field"><label for="fc-input">${isShip() ? "SBB or description" : "Feature code or description"}</label>
+        <input type="search" id="fc-input" placeholder="${isShip() ? "e.g. SBB7A94538 or Xeon" : "e.g. B0ML or TPM"}" value="${esc(fc)}" size="34" autocomplete="off"></div>
       <button class="btn primary" id="fc-go">Look up</button>
     </div>
     <div id="fc-results"></div>
@@ -1034,11 +1154,11 @@ async function renderAdjustments(fc) {
       const list = await localApi(`/api/fc-search?q=${encodeURIComponent(v)}`).catch(() => []);
       $("#fc-results").innerHTML = list.length ? `
         <div class="table-wrap short"><table>
-          <thead><tr><th>FC</th><th>Description</th><th>TCE in file</th><th>Current TCE</th></tr></thead>
+          <thead><tr><th>${L.code}</th><th>Description</th>${refTh()}<th>TCE in file</th><th>Current TCE</th></tr></thead>
           <tbody>${list.map(x => `<tr class="clickable" data-fc="${esc(x.featurecode)}">
-            <td class="mono">${esc(x.featurecode)}</td><td>${esc(x.description)}</td>
+            <td class="mono">${esc(x.featurecode)}</td><td>${esc(x.description)}</td>${refTd(x)}
             <td>${tceBadge(x.csv_tce)}</td><td>${tceBadge(x.tce)}${x.adjusted ? ' <span class="adj-tag">adjusted</span>' : ""}</td></tr>`).join("")}</tbody>
-        </table></div>` : `<div class="count">No feature codes match “${esc(v)}”.</div>`;
+        </table></div>` : `<div class="count">No ${L.codes} match “${esc(v)}”.</div>`;
       $$("tr[data-fc]", $("#fc-results")).forEach(tr => tr.onclick = () => setHash("adjustments", tr.dataset.fc, {}));
     }, 200);
   };
@@ -1048,7 +1168,7 @@ async function renderAdjustments(fc) {
     try { d = await api("/api/adjustments"); } catch (e) { $("#adj-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     $("#adj-list").innerHTML = d.adjustments.length ? `
       <div class="table-wrap short"><table>
-        <thead><tr><th>FC</th><th>Description</th><th>TCE in file</th><th>Adjusted to</th><th>Note</th><th>Updated</th><th></th></tr></thead>
+        <thead><tr><th>${L.code}</th><th>Description</th><th>TCE in file</th><th>Adjusted to</th><th>Note</th><th>Updated</th><th></th></tr></thead>
         <tbody>${d.adjustments.map(a => `<tr>
           <td class="mono"><a href="#/adjustments/${encodeURIComponent(a.featurecode)}">${esc(a.featurecode)}</a></td>
           <td>${esc(a.description)}${a.in_file ? "" : ' <span class="muted">(not in current file)</span>'}</td>
@@ -1062,7 +1182,7 @@ async function renderAdjustments(fc) {
 
     $("#adj-history").innerHTML = d.history.length ? `
       <div class="table-wrap short"><table>
-        <thead><tr><th>When</th><th>FC</th><th>Description</th><th>Action</th><th>From</th><th>To</th><th>Note</th></tr></thead>
+        <thead><tr><th>When</th><th>${L.code}</th><th>Description</th><th>Action</th><th>From</th><th>To</th><th>Note</th></tr></thead>
         <tbody>${d.history.map(h => `<tr><td class="muted">${esc(h.ts.replace("T", " "))}</td>
           <td class="mono">${esc(h.featurecode)}</td><td>${esc(h.description)}</td><td>${esc(h.action)}</td>
           <td>${tceBadge(h.from)}</td><td>${tceBadge(h.to)}</td><td>${esc(h.note)}</td></tr>`).join("")}</tbody>
@@ -1091,7 +1211,7 @@ async function renderAdjustments(fc) {
     const impactText = v => {
       if (v === d.tce) return `<span class="muted">Current value</span>`;
       const i = d.impact[v];
-      const parts = [`${fmt(i.bids_changed)} bid-items change proximity`];
+      const parts = [`${fmt(i.bids_changed)} ${L.items} change proximity`];
       if (i.become_tce_ready) parts.push(`<strong>${fmt(i.become_tce_ready)} become TCE-ready</strong> (${usdShort(i.become_tce_ready_value_usd)}; leave the ranking)`);
       if (i.enter_ranking) parts.push(`<strong>${fmt(i.enter_ranking)} TCE configs stop being TCE</strong> (${usdShort(i.enter_ranking_value_usd)}; enter the ranking)`);
       return parts.join(" · ");
@@ -1100,14 +1220,15 @@ async function renderAdjustments(fc) {
       <div class="fc-card">
         <div class="fc-card-head">
           <div><div class="fc-code mono">${esc(d.featurecode)}</div>
-            <div class="fc-desc">${d.descriptions.map(esc).join("<br>")}</div></div>
+            <div class="fc-desc">${d.descriptions.map(esc).join("<br>")}</div>
+            ${isShip() ? `<div class="fc-desc muted">FC(s): ${esc(d.ref_fc || "—")} · basic name: ${esc(d.basicname || "—")}</div>` : ""}</div>
           <div class="fc-vals">
             <div><div class="k">TCE in file</div>${tceBadge(d.csv_tce)}</div>
             <div><div class="k">Current TCE</div>${tceBadge(d.tce)}${d.adjusted ? ' <span class="adj-tag">adjusted</span>' : ""}</div>
           </div>
         </div>
-        <div class="fc-usage">Used in ${fmt(u.lines)} lines · ${fmt(u.quotes)} bids · ${fmt(u.bids)} bid-items · rev contrib ${usdShort(u.rev_contrib_usd)}.
-          Of those bid-items, ${fmt(u.bids_in_scope_in_ranking)} are in the ranking (not TCE yet) and ${fmt(u.tce_configs_in_scope)} are full TCE configs.</div>
+        <div class="fc-usage">Used in ${fmt(u.lines)} ${isShip() ? "rows" : "lines"} · ${fmt(u.quotes)} ${L.bidsWord} · ${fmt(u.bids)} ${L.items} · rev contrib ${usdShort(u.rev_contrib_usd)}.
+          Of those ${L.items}, ${fmt(u.bids_in_scope_in_ranking)} are in the ranking (not TCE yet) and ${fmt(u.tce_configs_in_scope)} are full TCE configs.</div>
         ${d.adjustment ? `<div class="fc-usage">Adjusted on ${esc(d.adjustment.updated.replace("T", " "))}${d.adjustment.note ? ` — “${esc(d.adjustment.note)}”` : ""}</div>` : ""}
         <div class="k section-k">New TCE value</div>
         <div class="tce-options">${TCE_VALUES.map(v => `

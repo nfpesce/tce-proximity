@@ -5,6 +5,8 @@
  * Además: ajustes TCE guardados en el navegador (mismo formato que tce_overrides.json),
  * exportación a Excel (SheetJS), apertura del archivo local (.xlsx / .csv; File System Access API o
  * <input type=file>) y el ranking WW con los archivos de las 4 geos.
+ * Shipments: el CSV de shipments (todas las geos) se detecta por sus columnas; la geo se elige con selectGeo()
+ * y el WW usa las 5 geos del mismo archivo (sin elegir archivos).
  */
 import * as engine from "./engine.js";
 
@@ -13,6 +15,11 @@ const SHEETJS_URL = "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs";
 export class ApiError extends Error {
   constructor(status, detail) { super(detail); this.status = status; }
 }
+
+// Las llamadas al motor se ejecutan de a una (un solo `raw` activo): así una consulta lanzada mientras el WW
+// recorre las geos (o mientras se abre un archivo) no lee datos de otra geo / archivo.
+let queue = Promise.resolve();
+const serial = fn => (...args) => { const p = queue.then(() => fn(...args)); queue = p.catch(() => {}); return p; };
 
 // mensajes de progreso (lectura de archivos grandes): la interfaz registra dónde mostrarlos
 let progress = () => {};
@@ -87,7 +94,9 @@ export class OverrideStore {
 }
 
 let store = new OverrideStore();
-export function useStore(s) { store = s; }          // los tests usan una clave propia
+let shipStore = new OverrideStore("tce_overrides_ship_v1");   // shipments: ajustes por SBB, aparte de los de quotes
+export function useStore(s, ship = s) { store = s; shipStore = ship; }   // los tests usan una clave propia
+const S = () => engine.currentSource() === "shipments" ? shipStore : store;
 
 // ============================================================ router /api/...
 const opt = v => (v === null || v === undefined || v === "" || v === "all" || v === "(todos)") ? null : v;
@@ -114,15 +123,16 @@ function proximityParam(qs) {
 }
 
 function adjustmentsPayload() {
-  const items = Object.entries(store.overrides())
+  const items = Object.entries(S().overrides())
     .sort((a, b) => (a[1].updated < b[1].updated ? 1 : a[1].updated > b[1].updated ? -1 : 0))
     .map(([fc, o]) => ({ featurecode: fc, ...o, in_file: engine.fcExists(fc), csv_tce_current_file: engine.fcCsvTce(fc) }));
   return { file: engine.currentFile(), storage: "this browser", adjustments: items,
-           history: store.history().reverse().slice(0, 200) };
+           history: S().history().reverse().slice(0, 200) };
 }
 
 /** Atiende una ruta de la API. Devuelve el JSON o lanza ApiError(status, detail). */
-export async function api(url, opts = {}) {
+export const api = serial(apiImpl);
+async function apiImpl(url, opts = {}) {
   const u = new URL(url, location.href);
   const path = u.pathname.replace(/^.*?\/api\//, "/api/");
   const qs = u.searchParams, method = (opts.method || "GET").toUpperCase();
@@ -130,11 +140,11 @@ export async function api(url, opts = {}) {
   const seg = path.split("/").filter(Boolean).map(decodeURIComponent);   // ["api", ...]
 
   if (!engine.currentFile()) throw new ApiError(404, "No data loaded. Open a data file.");
-  await engine.applyOverrides(store.mapping());
+  await engine.applyOverrides(S().mapping());
   try {
     if (method === "GET" && path === "/api/meta") {
       const m = await engine.meta();
-      m.adjustments = Object.entries(store.overrides()).map(([fc, o]) => ({ featurecode: fc, from: o.csv_tce ?? null, to: o.tce }));
+      m.adjustments = Object.entries(S().overrides()).map(([fc, o]) => ({ featurecode: fc, from: o.csv_tce ?? null, to: o.tce }));
       return m;
     }
     if (method === "GET" && path === "/api/ranking")
@@ -156,12 +166,13 @@ export async function api(url, opts = {}) {
       if (!r) throw new ApiError(404, `Feature code ${seg[2]} not found in ${engine.currentFile()}`);
       return r;
     }
-    if (method === "GET" && path === "/api/ww") return await ww(proximityParam(qs));
+    if (method === "GET" && path === "/api/ww")
+      return engine.currentSource() === "shipments" ? await shipWw(proximityParam(qs)) : await ww(proximityParam(qs));
     if (method === "GET" && path === "/api/fc-search") return engine.searchFc(param(qs, "q", ""));
     if (method === "GET" && seg[1] === "fc" && seg.length === 3) {
       const r = await engine.fcLookup(seg[2], express(qs), currency(qs));
       if (!r) throw new ApiError(404, `Feature code ${seg[2]} not found in ${engine.currentFile()}`);
-      r.adjustment = store.overrides()[r.featurecode] ?? null;
+      r.adjustment = S().overrides()[r.featurecode] ?? null;
       return r;
     }
     if (method === "GET" && path === "/api/adjustments") return adjustmentsPayload();
@@ -170,13 +181,13 @@ export async function api(url, opts = {}) {
         const info = await engine.fcLookup(seg[2], null, null);
         if (!info) throw new ApiError(404, `Feature code ${seg[2]} not found in ${engine.currentFile()}`);
         const fc = info.featurecode;
-        store.set(fc, body?.tce, engine.fcCsvTce(fc), engine.fcDescription(fc), String(body?.note ?? "").trim());
-        await engine.applyOverrides(store.mapping());
+        S().set(fc, body?.tce, engine.fcCsvTce(fc), engine.fcDescription(fc), String(body?.note ?? "").trim());
+        await engine.applyOverrides(S().mapping());
         return adjustmentsPayload();
       }
       if (method === "DELETE") {
-        if (!store.remove(seg[2])) throw new ApiError(404, `No active adjustment for ${seg[2]}`);
-        await engine.applyOverrides(store.mapping());
+        if (!S().remove(seg[2])) throw new ApiError(404, `No active adjustment for ${seg[2]}`);
+        await engine.applyOverrides(S().mapping());
         return adjustmentsPayload();
       }
     }
@@ -209,7 +220,7 @@ async function ww(prox) {
   const pick = wwPick();
   if (!Object.keys(pick).length)
     throw new ApiError(428, "Choose the data files of the geos (NA, AP, LA, EMEA) to build the WW ranking.");
-  const key = JSON.stringify([Object.entries(pick).map(([g, f]) => [g, fileKey(f)]), prox, store.mapping()]);
+  const key = JSON.stringify([Object.entries(pick).map(([g, f]) => [g, fileKey(f)]), prox, S().mapping()]);
   if (wwMemo?.key === key) return wwMemo.result;
   const perGeo = {}, files = {};
   const restore = currentFileObj;
@@ -222,9 +233,9 @@ async function ww(prox) {
         progress(`WW ranking: reading ${g} (${f.name})…`);
         await engine.loadFile(f, f.name, { onProgress: p => progress(`WW ranking: reading ${g} (${f.name})… ${Math.round(100 * p)}%`) });
         reloaded = true;
-        store.dropStale(engine.fcCsvMap(), f.name);
+        S().dropStale(engine.fcCsvMap(), f.name);
       }
-      await engine.applyOverrides(store.mapping());
+      await engine.applyOverrides(S().mapping());
       perGeo[g] = [await engine.fcRanking(prox, "exactly", null, null, null, false), await engine.dependency()];
       files[g] = f.name;
     }
@@ -232,10 +243,35 @@ async function ww(prox) {
     if (reloaded && restore) {
       progress(`Reopening ${restore.name}…`);
       await engine.loadFile(restore, restore.name);
-      await engine.applyOverrides(store.mapping());
+      await engine.applyOverrides(S().mapping());
     }
   }
   const result = engine.combineWw(perGeo, files, prox ?? []);
+  if (!prox) result.filters.proximity = null;
+  wwMemo = { key, result };
+  return result;
+}
+
+/** WW de shipments: las 5 geos del archivo cargado (como ShipmentStore en Python) */
+async function shipWw(prox) {
+  const key = JSON.stringify(["ship", engine.shipFile(), prox, S().mapping()]);
+  if (wwMemo?.key === key) return wwMemo.result;
+  const active = engine.currentGeo(), perGeo = {}, files = {}, revAll = {};
+  try {
+    for (const g of engine.SHIP_GEOS) {
+      progress(`WW ranking: ${g}…`);
+      await engine.selectGeo(g);
+      S().dropStale(engine.fcCsvMap(), engine.shipFile());
+      await engine.applyOverrides(S().mapping());
+      perGeo[g] = [await engine.fcRanking(prox, "exactly", null, null, null, false), await engine.dependency()];
+      files[g] = engine.shipFile();
+      revAll[g] = engine.fcRevAll();
+    }
+  } finally {
+    await engine.selectGeo(active);
+    await engine.applyOverrides(S().mapping());
+  }
+  const result = engine.combineWw(perGeo, files, prox ?? [], { geoList: engine.SHIP_GEOS, revAll, source: "shipments" });
   if (!prox) result.filters.proximity = null;
   wwMemo = { key, result };
   return result;
@@ -245,13 +281,40 @@ async function ww(prox) {
 let XLSX = null;
 async function sheetjs() { return XLSX || (XLSX = await import(SHEETJS_URL)); }
 
+const SHIP_EXPORT_NAMES = {
+  featurecode: "SBB", FC: "SBB", ref_fc: "FC(s)", basicname: "Basic name",
+  opp_number: "end_customer_number", account: "end_customer_name", opp_total: "customer_total",
+  opp_value_usd: "customer_value_usd", forecast_category_name: "segment1", forecast: "segment1",
+  quotenumber: "so", Bid_Item: "mfgsoline", bid_item: "mfgsoline", product: "family",
+  bid_pn: "mtm", status: "sc_status", contract_start: "ship_date", quotelines_quantity: "qty",
+  tot_lines_qty: "so_total_qty", total_final_price: "so_value_usd", end_customer: "end_customer_name",
+  "Bid Item Price (USD)": "Config value (USD)", value_usd: "config_value_usd", item: null,
+  express: null, sales_rep: null,
+};
+const SHIP_SHEET_NAMES = { "FC ranking": "SBB ranking", "Quote Detail": "Order Detail", Bids: "Configs" };
+function shipRows(rows) {
+  return rows.map(r => {
+    const o = {};
+    for (const [k, v] of Object.entries(r)) {
+      const name = k in SHIP_EXPORT_NAMES ? SHIP_EXPORT_NAMES[k] : k;
+      if (name !== null && !(name in o)) o[name] = v;
+    }
+    return o;
+  });
+}
+const refCols = x => "ref_fc" in x ? { ref_fc: x.ref_fc, basicname: x.basicname } : {};
+
 async function writeXlsx(sheets, filename) {
   const X = await sheetjs();
-  const adj = store.overrides();
+  const adj = S().overrides();
   if (Object.keys(adj).length) {   // deja registrado que la base tiene ajustes
     sheets = { ...sheets, "TCE Adjustments": Object.entries(adj).map(([fc, o]) => ({
       featurecode: fc, description: o.description || "", "TCE in file": o.csv_tce ?? null,
       "TCE adjusted": o.tce, note: o.note || "", updated: o.updated })) };
+  }
+  if (engine.currentSource() === "shipments") {
+    sheets = Object.fromEntries(Object.entries(sheets).map(([n, d]) => [SHIP_SHEET_NAMES[n] || n, shipRows(d)]));
+    filename = filename.replace("TCE_", "TCE_Shipments_").replace("_FC", "_SBB").replace("Quote_", "Order_");
   }
   const wb = X.utils.book_new();
   for (const [name, data] of Object.entries(sheets)) {
@@ -265,7 +328,7 @@ async function writeXlsx(sheets, filename) {
 }
 
 const depRows = rows => rows.map((x, i) => ({
-  Rank: i + 1, featurecode: x.featurecode, description: x.description, "Nbr of TCE Configs": x.configs, "% of TCE Configs": x.pct,
+  Rank: i + 1, featurecode: x.featurecode, description: x.description, ...refCols(x), "Nbr of TCE Configs": x.configs, "% of TCE Configs": x.pct,
   "Rev Contrib All Configs (USD)": x.rev_all_usd, "Rev Contrib TCE Sel (USD)": x.rev_tce_usd, "TCE Sel / All": x.tce_share,
   "Rank by Rev Contrib TCE Sel": x.rev_tce_rank }));
 
@@ -286,7 +349,7 @@ export async function exportUrl(url) {
   if (path === "/api/export/fc-ranking.xlsx") {
     const r = await api(base.href);
     return writeXlsx({
-      "FC ranking": r.rows.map((x, i) => ({ Rank: i + 1, featurecode: x.featurecode, description: x.description,
+      "FC ranking": r.rows.map((x, i) => ({ Rank: i + 1, featurecode: x.featurecode, description: x.description, ...refCols(x),
         "Nbr of Configs": x.configs, "% of Configs in Scope": r.configs_in_scope ? x.configs / r.configs_in_scope : 0,
         "Rev Contrib (USD)": x.rev_contrib_usd, "% of Rev Contrib": x.rev_pct, "Rank by Rev Contrib": x.rev_rank,
         "Value of configs in scope (USD)": x.value_in_scope_usd })),
@@ -298,13 +361,13 @@ export async function exportUrl(url) {
   if (path === "/api/export/ww.xlsx") {
     const r = await api(base.href), geos = r.geos;
     const p = r.proximity.rows.map((x, i) => ({
-      Rank: i + 1, FC: x.featurecode, Description: x.description, "Total Configs WW": x.configs_ww,
+      Rank: i + 1, FC: x.featurecode, Description: x.description, ...refCols(x), "Total Configs WW": x.configs_ww,
       ...Object.fromEntries(geos.map(g => [g, x.configs[g] || 0])), "# of Geos": x.n_geos, "% of WW Configs": x.pct,
       "Cumulative %": x.cum_pct, "Rev Contrib WW (USD)": x.rev_contrib_usd_ww,
       ...Object.fromEntries(geos.map(g => [`Rev Contrib ${g}`, x.rev_contrib_usd[g] || 0])),
       "% of WW Rev Contrib": x.rev_pct, "Rank by Rev Contrib": x.rev_rank }));
     const d = r.dependency.rows.map((x, i) => ({
-      Rank: i + 1, FC: x.featurecode, Description: x.description, "Total TCE Configs WW": x.configs_ww,
+      Rank: i + 1, FC: x.featurecode, Description: x.description, ...refCols(x), "Total TCE Configs WW": x.configs_ww,
       ...Object.fromEntries(geos.map(g => [g, x.configs[g] || 0])), "# of Geos": x.n_geos, "% of WW TCE Configs": x.pct,
       "Rev Contrib All WW (USD)": x.rev_all_usd_ww, ...Object.fromEntries(geos.map(g => [`Rev Contrib All ${g}`, x.rev_all_usd[g] || 0])),
       "Rev Contrib TCE Sel WW (USD)": x.rev_tce_usd_ww, ...Object.fromEntries(geos.map(g => [`Rev Contrib TCE Sel ${g}`, x.rev_tce_usd[g] || 0])),
@@ -326,18 +389,18 @@ export async function exportUrl(url) {
 
 // ============================================================ ajustes: exportar / importar JSON
 export function exportAdjustmentsFile() {
-  const blob = new Blob([JSON.stringify({ version: 1, overrides: store.overrides(), history: store.history() }, null, 1)],
+  const blob = new Blob([JSON.stringify({ version: 1, overrides: S().overrides(), history: S().history() }, null, 1)],
                         { type: "application/json" });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = "tce_overrides.json";
+  a.href = URL.createObjectURL(blob); a.download = engine.currentSource() === "shipments" ? "tce_overrides_shipments.json" : "tce_overrides.json";
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 export async function importAdjustmentsFile(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch { throw new ApiError(400, "The file is not valid JSON."); }
-  store.replaceAll(data);
-  await engine.applyOverrides(store.mapping());
+  S().replaceAll(data);
+  await engine.applyOverrides(S().mapping());
 }
 
 // ============================================================ apertura del archivo local
@@ -356,36 +419,63 @@ function idb(mode, fn) {
   });
 }
 const saveHandle = (h, key = "last") => idb("readwrite", s => s.put(h, key)).catch(() => {});
-export const lastHandle = () => idb("readonly", s => s.get("last")).catch(() => null);
+export const lastHandle = (source = "quotes") => idb("readonly", s => s.get(source === "shipments" ? "last-ship" : "last")).catch(() => null);
 export const lastWwHandles = () => idb("readonly", s => s.get("ww")).catch(() => null);
 export const canPickFiles = () => typeof window.showOpenFilePicker === "function";
 const PICKER_TYPES = [{ description: "Quotes data (.xlsx, .csv)", accept: {
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"], "text/csv": [".csv"] } }];
 
-/** Abre el selector de archivos del sistema (recuerda el archivo para reabrirlo la próxima vez) */
+/** Abre el selector de archivos del sistema (al cargarlo bien se recuerda para reabrirlo la próxima vez) */
+let pendingHandle = null;
 export async function pickFile() {
   const [h] = await window.showOpenFilePicker({ types: PICKER_TYPES, multiple: false });
-  await saveHandle(h);
+  pendingHandle = h;
   return h.getFile();
 }
 async function granted(h) {
   return (await h.queryPermission?.({ mode: "read" })) === "granted" || (await h.requestPermission?.({ mode: "read" })) === "granted";
 }
 /** Reabre el último archivo (requiere un clic del usuario para el permiso de lectura) */
-export async function reopenLast() {
-  const h = await lastHandle();
+export async function reopenLast(source = "quotes") {
+  const h = await lastHandle(source);
   if (!h || !(await granted(h))) return null;
   return h.getFile();
 }
-export async function loadFile(file) {
+const fileBySource = { quotes: null, shipments: null };   // último archivo cargado de cada origen
+export const loadFile = serial(loadFileImpl);
+async function loadFileImpl(file) {
+  const handle = pendingHandle;
+  pendingHandle = null;
   try {
     const big = /\.xlsx$/i.test(file.name) && !(await engine.isCached(file));
     const m = await engine.loadFile(file, file.name, { onProgress: p => progress(`Reading ${file.name}… ${Math.round(100 * p)}%${big ? " (first time only; then it is cached in this browser)" : ""}`) });
-    currentFileObj = file;
-    store.dropStale(engine.fcCsvMap(), file.name);
+    const source = engine.currentSource();
+    if (source === "quotes") currentFileObj = file;
+    fileBySource[source] = file;
+    if (handle) await saveHandle(handle, source === "shipments" ? "last-ship" : "last");
+    S().dropStale(engine.fcCsvMap(), file.name);
     return m;
   } catch (e) { throw new ApiError(422, e.message); }
 }
+/** Shipments: cambia la geo activa (el archivo ya está cargado en el navegador) */
+export const selectGeo = serial(selectGeoImpl);
+async function selectGeoImpl(geo) {
+  try {
+    const m = await engine.selectGeo(geo);
+    S().dropStale(engine.fcCsvMap(), engine.shipFile());
+    return m;
+  } catch (e) { throw new ApiError(422, e.message); }
+}
+/** Vuelve a un origen ya abierto en esta sesión (true) o indica que hay que abrir un archivo (false) */
+export const switchSource = serial(async (source, geo) => {
+  if (source === engine.currentSource()) return true;
+  if (source === "shipments" && engine.shipFile()) { await selectGeoImpl(geo || engine.SHIP_GEOS[0]); return true; }
+  if (source === "quotes" && fileBySource.quotes) { await loadFileImpl(fileBySource.quotes); return true; }
+  return false;
+});
+export const currentSource = () => engine.currentSource();
+export const currentGeo = () => engine.currentGeo();
+export const SHIP_GEOS = engine.SHIP_GEOS;
 export const initEngine = () => engine.init();
 
 /** WW: el usuario elige los archivos de las geos (se recuerdan para la próxima vez) */

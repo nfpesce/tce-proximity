@@ -9,6 +9,10 @@
  * `tce` es el valor efectivo (archivo + ajustes manuales); `tce_csv` el original del archivo.
  * Valor del bid-item (USD) = bid_item_value_usd (o salesprice x quotelines_quantity / exchangerate).
  * Revenue contribution de un FC = suma del valor de los bid-items que lo contienen; "TCE Sel" = sólo los full TCE.
+ *
+ * Shipments (CSV de la query Magellan, un archivo con todas las geos): se normaliza al mismo esquema
+ * (SBB -> featurecode, mfgsoline -> bid_item, SO -> quotenumber, sbb_tce_flag -> TCE; como normalize_shipments
+ * en Python) en la tabla `ship_all` (sin PRC) y `raw` es la geo elegida (selectGeo). El WW recorre las 5 geos.
  */
 import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm";
 import { readXlsx, XlsxError } from "./xlsx.js";
@@ -35,6 +39,13 @@ const USED_COLUMNS = [
 ];
 export const TCE_VALUES = ["N", "Y", "Not Mapped"];
 export const GEOS = ["NA", "AP", "LA", "EMEA"];
+// Shipments (como SHIP_COLUMNS / SHIP_GEOS en app/data.py): Europe + META = EMEA de quotes; PRC excluido
+export const SHIP_COLUMNS = [
+  "so", "order_type", "geo", "country", "fc", "qty", "sbbusage", "ship_date", "mfgsoline", "brand", "family",
+  "mtm", "cto", "plant", "end_customer_name", "end_customer_number", "sc_status", "segment1", "order_date",
+  "revenue_num", "productid_des", "sbb", "sbb_tce_flag", "basicname", "tce",
+];
+export const SHIP_GEOS = ["NA", "AP", "LA", "Europe", "META"];
 export const NO_OPP = "(no opp)";
 export const NO_ACCOUNT = "(no account)";
 export const BLANK = "(blank)";   // valor vacío en los filtros de selección múltiple
@@ -72,28 +83,31 @@ export function rankDesc(values) {
 }
 export const geoFromName = name => { const m = /^\s*(NA|AP|LA|EMEA)\b/i.exec(name); return m ? m[1].toUpperCase() : ""; };
 
-/** "XXXXX000000001-12" -> 12 (9999 si no hay sufijo numérico) */
+/** "XXXXX000000001-12" -> 12 (9999 si no hay sufijo numérico); un mfgsoline (sin guion) usa sus dígitos finales */
 export function itemNumber(bidItem) {
   const parts = String(bidItem).split("-");
-  if (parts.length < 2) return 9999;
+  if (parts.length < 2) { const m = /(\d+)$/.exec(String(bidItem)); return m ? Number(m[1]) : 9999; }
   const t = parts[parts.length - 1].trim();
   return /^[+-]?\d+$/.test(t) ? parseInt(t, 10) : 9999;
 }
-const itemLabel = bid => `item-${String(bid).split("-").pop()}`;
+const itemLabel = bid => String(bid).includes("-") ? `item-${String(bid).split("-").pop()}` : String(bid);
 
 /** Clave para ordenar quotes por su parte numérica final (los prefijos alfabéticos no cuentan) */
 function quoteKeyCmp(a, b) {            // descendente, como sort(reverse=True) en Python
-  const ka = /(\d{9})$/.exec(a), kb = /(\d{9})$/.exec(b);
-  const na = ka ? parseInt(ka[1], 10) : -1, nb = kb ? parseInt(kb[1], 10) : -1;
+  const key = q => /^\d+$/.test(q) ? Number(q) : (m => m ? parseInt(m[1], 10) : -1)(/(\d{9})$/.exec(q));   // SO: número entero
+  const na = key(a), nb = key(b);
   return (nb - na) || cmp(b, a);
 }
 
 // ------------------------------------------------------------------ estado
 let db = null, conn = null, seq = 0;
-let ds = null;   // dataset activo: { name, geo, fcCsvTce, fcDescription, fcRevAll, quotes, bidFirst, prox, overrides }
+let ds = null;   // dataset activo: { name, source, geo, fcCsvTce, fcDescription, fcRevAll, fcRef, fcBasic, quotes, bidFirst, prox, overrides }
+let ship = null; // shipments cargado en `ship_all`: { name, file }
 
 export function currentFile() { return ds?.name ?? null; }
 export function currentGeo() { return ds?.geo ?? ""; }
+export function currentSource() { return ds?.source ?? null; }
+export function shipFile() { return ship?.name ?? null; }
 
 // una sola inicialización aunque se pida varias veces a la vez (precarga + apertura rápida de un archivo)
 let initPromise = null;
@@ -204,6 +218,10 @@ export async function loadFile(file, name = file.name, { onProgress } = {}) {
       await db.registerFileHandle(reg, file, duckdb.DuckDBDataProtocol.BROWSER_FILEREADER, true);
       src = `read_csv(${sq(reg)}, header=true, all_varchar=true, delim=',', quote='"', escape='"')`;
       const header = (await rows(`DESCRIBE SELECT * FROM ${src}`)).map(r => r.column_name);
+      if (SHIP_COLUMNS.every(c => header.includes(c)) && !EXPECTED_COLUMNS.every(c => header.includes(c))) {
+        regs = [];
+        return await loadShipments(file, name, reg, src);
+      }
       const missing = EXPECTED_COLUMNS.filter(c => !header.includes(c));
       if (missing.length) throw new DataError(`Missing columns in ${name}: ${missing.join(", ")}`);
       hasValue = header.includes(VALUE_COLUMN);
@@ -249,22 +267,83 @@ export async function loadFile(file, name = file.name, { onProgress } = {}) {
   if (stage) await conn.query("DROP TABLE IF EXISTS stage");
   for (const r of regs) await db.dropFile(r).catch(() => {});
 
-  // Cachés (como los diccionarios de Dataset en Python)
+  await buildDs(name, "quotes");
+  return meta();
+}
+
+/** Cachés del dataset activo (como los diccionarios de Dataset en Python) */
+async function buildDs(name, source, geoSel = null) {
+  const s = source === "shipments";
   const fc = await rows(`SELECT featurecode, arg_min(description, rid) AS d, arg_min(tce_csv, rid) AS t, min(rid) AS r,
+                           ${s ? "arg_min(sbb_fcs, rid) AS fcs, arg_min(basicname, rid) AS bn," : ""}
                            COALESCE(sum(value_usd), 0) AS rev FROM raw GROUP BY featurecode ORDER BY r`);
   const firsts = await rows(`SELECT * FROM raw WHERE rid IN (SELECT min(rid) FROM raw GROUP BY bid_item)`);
   const geo = (await rows(`SELECT geo, count(*) n FROM raw WHERE geo <> '' GROUP BY geo ORDER BY n DESC, geo LIMIT 1`))[0]?.geo;
   ds = {
-    name, geo: geo || geoFromName(name),
+    name, source, geo: geoSel || geo || geoFromName(name),
     fcCsvTce: new Map(fc.map(r => [r.featurecode, r.t])),
     fcDescription: new Map(fc.map(r => [r.featurecode, r.d])),
     fcRevAll: new Map(fc.map(r => [r.featurecode, r.rev])),
+    fcRef: new Map(s ? fc.map(r => [r.featurecode, r.fcs]) : []),
+    fcBasic: new Map(s ? fc.map(r => [r.featurecode, r.bn]) : []),
     quotes: (await rows(`SELECT DISTINCT quotenumber q FROM raw`)).map(r => r.q),
     bidFirst: new Map(firsts.map(r => [r.bid_item, r])),
     prox: new Map(),
     overrides: {},
   };
   await updateProximity();
+}
+
+/** Shipments (CSV): normaliza el archivo entero en `ship_all` (sin PRC) y activa la primera geo */
+async function loadShipments(file, name, reg, src) {
+  // nulos de la query exportados como el texto NULL -> vacío (salvo el código del SBB, como en Python)
+  const v = c => c === "sbb" ? `COALESCE("sbb", '')` : `CASE WHEN "${c}" = 'NULL' THEN '' ELSE COALESCE("${c}", '') END`;
+  try {
+    await conn.query(`CREATE OR REPLACE TABLE ship_src AS SELECT (row_number() OVER ()) - 1 AS rid,
+        ${SHIP_COLUMNS.map(c => `${v(c)} AS "${c}"`).join(", ")} FROM ${src}`);
+    await conn.query(`DELETE FROM ship_src WHERE geo NOT IN (${SHIP_GEOS.map(sq).join(", ")})`);
+    const cnt = (await rows(`SELECT CAST(count(*) AS INTEGER) n FROM ship_src`))[0].n;
+    if (!cnt) throw new DataError(`${name} has no rows`);
+    const bad = (await rows(`SELECT DISTINCT sbb_tce_flag v FROM ship_src WHERE sbb_tce_flag NOT IN ('N', 'Y', 'Not Mapped') ORDER BY 1`)).map(r => r.v);
+    if (bad.length) throw new DataError(`Unrecognized TCE_Actual values: ${bad.join(", ")}`);
+    // valor de la configuración = MAX(revenue_num) por mfgsoline; total de la SO = suma del valor de sus configs;
+    // FC(s) de cada SBB: distintos, del más frecuente al menos (todas las geos)
+    await conn.query(`CREATE OR REPLACE TABLE ship_all AS
+      WITH s AS (SELECT *, max(TRY_CAST(REPLACE(revenue_num, ',', '') AS DOUBLE)) OVER (PARTITION BY mfgsoline) AS cfg_value FROM ship_src),
+      cfg AS (SELECT mfgsoline, arg_min(so, rid) AS so, arg_min(cfg_value, rid) AS v FROM s GROUP BY mfgsoline),
+      sot AS (SELECT so, COALESCE(sum(v), 0) AS total FROM cfg GROUP BY so),
+      p AS (SELECT sbb, TRIM(f) AS f FROM (SELECT sbb, unnest(string_split(fc, ',')) AS f FROM ship_src)),
+      c AS (SELECT sbb, f, count(*) AS n FROM p WHERE f <> '' GROUP BY sbb, f),
+      fcs AS (SELECT sbb, string_agg(f, ', ' ORDER BY n DESC, f) AS fcs FROM c GROUP BY sbb)
+      SELECT s.rid, s.so AS quotenumber, s.sc_status AS status, s.geo, s.country, s.sbb AS featurecode,
+        s.productid_des AS description, s.sbb_tce_flag AS tce_csv, s.sbb_tce_flag AS tce,
+        COALESCE(TRY_CAST(s.sbbusage AS DOUBLE), 0) AS quantity, TRY_CAST(s.qty AS DOUBLE) AS quotelines_quantity,
+        s.ship_date AS contractstartdate, s.end_customer_number AS opp_number, s.segment1 AS forecast, s.family AS product,
+        s.mtm AS bid_pn, s.mfgsoline AS bid_item, s.order_type AS quotetype, s.plant AS fulfillment,
+        s.end_customer_name AS end_customer, s.end_customer_name AS account, s.order_date AS created,
+        '' AS sales_rep, 'USD' AS currency, sot.total AS totalfinalprice, s.cfg_value AS value_usd, '' AS express,
+        CASE WHEN s.end_customer_number = '' THEN ${sq(NO_OPP)} ELSE s.end_customer_number END AS opp_label,
+        CASE WHEN s.end_customer_name = '' THEN ${sq(NO_ACCOUNT)} ELSE s.end_customer_name END AS account_label,
+        s.fc AS ref_fc, COALESCE(fcs.fcs, '') AS sbb_fcs, s.basicname, s.tce AS order_tce, s.cto
+      FROM s LEFT JOIN sot ON sot.so = s.so LEFT JOIN fcs ON fcs.sbb = s.sbb ORDER BY s.rid`);
+  } catch (e) {
+    await conn.query("DROP TABLE IF EXISTS ship_src");
+    await db.dropFile(reg).catch(() => {});
+    throw e instanceof DataError ? e : new DataError(`Cannot read ${name}: ${e.message || e}`);
+  }
+  await conn.query("DROP TABLE IF EXISTS ship_src");
+  await db.dropFile(reg).catch(() => {});
+  ship = { name, file };
+  return selectGeo(SHIP_GEOS[0]);
+}
+
+/** Shipments: activa una geo (raw = sus filas de ship_all) */
+export async function selectGeo(geo) {
+  if (!ship) throw new DataError("No shipments file loaded.");
+  if (!SHIP_GEOS.includes(geo)) throw new DataError(`geo must be one of: ${SHIP_GEOS.join(", ")}`);
+  await conn.query(`CREATE OR REPLACE TABLE raw AS SELECT * FROM ship_all WHERE geo = ${sq(geo)} ORDER BY rid`);
+  if (!(await rows(`SELECT CAST(count(*) AS INTEGER) n FROM raw`))[0].n) throw new DataError(`${ship.name} has no rows for geo ${geo}`);
+  await buildDs(ship.name, "shipments", geo);
   return meta();
 }
 
@@ -297,6 +376,9 @@ export async function applyOverrides(overrides) {
 }
 
 export function fcExists(fc) { return need().fcCsvTce.has(fc); }
+/** Columnas de referencia de un SBB (FC(s) y basicname); vacío en quotes (como Dataset.ref en Python) */
+const ref = fc => ds.source !== "shipments" ? {} : { ref_fc: ds.fcRef.get(fc) ?? "", basicname: ds.fcBasic.get(fc) ?? "" };
+export function fcRevAll() { return new Map(need().fcRevAll); }
 export function fcCsvTce(fc) { return need().fcCsvTce.get(fc) ?? null; }
 export function fcDescription(fc) { return need().fcDescription.get(fc) ?? ""; }
 export function fcCsvMap() { return new Map(need().fcCsvTce); }
@@ -314,7 +396,7 @@ export async function meta() {
   for (const r of await rows(`SELECT tce, CAST(count(*) AS INTEGER) n FROM raw GROUP BY tce`)) counts[r.tce] = r.n;
   const firsts = [...ds.bidFirst.values()];
   return {
-    file: ds.name, geo: ds.geo, rows: m.n_rows, quotes: m.quotes, bids: m.bids,
+    file: ds.name, source: ds.source, geo: ds.geo, rows: m.n_rows, quotes: m.quotes, bids: m.bids,
     tce_configs: [...ds.prox.values()].filter(k => k === 0).length,
     value_usd: usd(sumNum(firsts.map(f => f.value_usd))),
     bids_without_value: firsts.filter(f => !isNum(f.value_usd)).length,
@@ -445,8 +527,10 @@ export async function quoteDetail(quote) {
   const fcPos = firstPos("featurecode"), descPos = firstPos("description"), bidPos = firstPos("bid_item");
 
   const groups = new Map();
+  const shipS = ds.source === "shipments";
   for (const r of q) {
-    const key = [r.bid_item, r.bid_pn, r.product, r.express, r.featurecode, r.description].join("\u0000");
+    const key = [r.bid_item, r.bid_pn, r.product, r.express, r.featurecode, r.description,
+                 ...(shipS ? [r.ref_fc, r.basicname] : [])].join("\u0000");
     if (!groups.has(key)) groups.set(key, { r, N: 0, Y: 0, NM: 0, qlq: null });
     const g = groups.get(key);
     // quotelines_quantity: constante por bid-item; max() como en pandas (ignora vacíos)
@@ -461,7 +545,9 @@ export async function quoteDetail(quote) {
   list.sort((a, b) => (itemNumber(a.r.bid_item) - itemNumber(b.r.bid_item)) || (b.N - a.N) || (b.Y - a.Y) || (b.NM - a.NM));
   const rowsOut = list.map(({ r, N, Y, NM, qlq }) => ({
     item: itemLabel(r.bid_item), bid_item: r.bid_item, bid_pn: r.bid_pn, product: r.product, express: r.express,
-    featurecode: r.featurecode, description: r.description, quotelines_quantity: num(qlq), N: num(N), Y: num(Y), "Not Mapped": num(NM),
+    featurecode: r.featurecode, description: r.description,
+    ...(shipS ? { ref_fc: r.ref_fc, basicname: r.basicname } : {}),
+    quotelines_quantity: num(qlq), N: num(N), Y: num(Y), "Not Mapped": num(NM),
     rev_contrib_usd: usd(ds.fcRevAll.get(r.featurecode) ?? null),
     adjusted_from: r.featurecode in ds.overrides ? (ds.fcCsvTce.get(r.featurecode) ?? null) : null,
   }));
@@ -485,6 +571,7 @@ export async function quoteDetail(quote) {
       contract_start: f.contractstartdate, created: f.created, quotetype: f.quotetype,
       fulfillment: f.fulfillment, total_final_price: num(f.totalfinalprice),
       value_usd: usd(sumNum(bidsOut.map(b => b.value_usd))),
+      ...(shipS ? { order_tce: f.order_tce, cto: f.cto } : {}),
     },
     bids: bidsOut,
     rows: rowsOut,
@@ -537,7 +624,7 @@ export async function fcRanking(proximity = 1, criteria = "exactly", express = n
     lines_in_scope: scope.length,
     value_in_scope_usd: usd(sumNum(scopeBids.map(bidValue))),
     rows: fcs.map(({ fc, list, rev: r, value }, i) => ({
-      featurecode: fc, description: list[0].description, configs: list.length,
+      featurecode: fc, description: list[0].description, ...ref(fc), configs: list.length,
       rev_contrib_usd: usd(r), rev_pct: revTotal ? r / revTotal : 0, rev_rank: ranks[i], value_in_scope_usd: usd(value),
       ...(withBids ? {
         bids: list.map(b => ({ bid_item: b.bid_item, quotenumber: b.quotenumber, opp_number: b.opp_label,
@@ -565,7 +652,7 @@ export async function dependency(express = null, currency = null, products = nul
     y.sort((a, b) => (b.configs - a.configs) || cmp(a.featurecode, b.featurecode));
     const ranks = rankDesc(y.map(x => x.rev_tce));
     out = y.map((x, i) => ({
-      featurecode: x.featurecode, description: x.description, configs: x.configs,
+      featurecode: x.featurecode, description: x.description, ...ref(x.featurecode), configs: x.configs,
       pct: tceConfigs ? x.configs / tceConfigs : 0,
       rev_all_usd: usd(x.rev_all), rev_tce_usd: usd(x.rev_tce),
       tce_share: x.rev_all ? x.rev_tce / x.rev_all : 0,
@@ -600,7 +687,7 @@ export async function dependencyConfigs(fc, express = null, currency = null, pro
 function fcSummary(fc) {
   const csv = ds.fcCsvTce.get(fc) ?? null;
   return { featurecode: fc, description: ds.fcDescription.get(fc) ?? "", csv_tce: csv,
-           tce: fc in ds.overrides ? ds.overrides[fc] : csv, adjusted: fc in ds.overrides };
+           tce: fc in ds.overrides ? ds.overrides[fc] : csv, adjusted: fc in ds.overrides, ...ref(fc) };
 }
 
 export function searchFc(text, limit = 25) {
@@ -659,21 +746,27 @@ export async function fcLookup(code, express = null, currency = null) {
 }
 
 // ------------------------------------------------------ WW (las 4 geos)
-/** Combina los rankings de cada geo como DataStore.ww() de Python. perGeo: {geo: [fcRanking sin bids, dependency]} */
-export function combineWw(perGeo, files, prox) {
-  const geos = GEOS.filter(g => g in perGeo);
+/** Combina los rankings de cada geo como DataStore.ww() de Python. perGeo: {geo: [fcRanking sin bids, dependency]}
+ *  Shipments: geoList = SHIP_GEOS y revAll = {geo: Map(sbb -> rev contrib)} para mostrar la Rev Contrib de cada geo
+ *  aunque el SBB no tenga configs en scope (WW_FILL_REV en Python). */
+export function combineWw(perGeo, files, prox, { geoList = GEOS, revAll = null, source = "quotes" } = {}) {
+  const geos = geoList.filter(g => g in perGeo);
   const combine = (part, totalKey, valueKeys) => {
     const rows = new Map();
     const totals = Object.fromEntries(geos.map(g => [g, perGeo[g][part][totalKey]]));
     for (const g of geos) for (const r of perGeo[g][part].rows) {
-      if (!rows.has(r.featurecode)) rows.set(r.featurecode, { featurecode: r.featurecode, description: r.description, configs: {},
+      if (!rows.has(r.featurecode)) rows.set(r.featurecode, { featurecode: r.featurecode, description: r.description,
+                                                             ...("ref_fc" in r ? { ref_fc: r.ref_fc, basicname: r.basicname } : {}), configs: {},
                                                              ...Object.fromEntries(valueKeys.map(v => [v, {}])) });
       const x = rows.get(r.featurecode);
       x.configs[g] = r.configs;
       for (const v of valueKeys) x[v][g] = r[v];
     }
     const totalAll = Object.values(totals).reduce((a, b) => a + b, 0);
+    const fill = revAll ? valueKeys.filter(v => v === "rev_contrib_usd" || v === "rev_all_usd") : [];
     const out = [...rows.values()].map(x => {
+      for (const v of fill) for (const g of geos)
+        if (!(g in x[v]) && revAll[g].get(x.featurecode)) x[v][g] = usd(revAll[g].get(x.featurecode));
       x.configs_ww = Object.values(x.configs).reduce((a, b) => a + b, 0);
       x.n_geos = Object.values(x.configs).filter(v => v > 0).length;
       x.pct = totalAll ? x.configs_ww / totalAll : 0;
@@ -701,7 +794,7 @@ export function combineWw(perGeo, files, prox) {
   });
   return {
     filters: { proximity: prox.length === 1 ? prox[0] : prox },
-    geos, files, missing_geos: GEOS.filter(g => !(g in perGeo)),
+    source, geos, files, missing_geos: geoList.filter(g => !(g in perGeo)),
     proximity: p, dependency: d,
   };
 }

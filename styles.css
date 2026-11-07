@@ -72,6 +72,12 @@ button, input, select { font: inherit; color: inherit; }
 .tabs a.active { background: var(--accent-soft); color: var(--accent); }
 .filebox { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .filebox label { font-size: 12px; color: var(--muted); }
+/* selector de origen de datos (Quotes / Shipments) */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+.seg button:not(.on):hover { background: var(--hover, rgba(127,127,127,.12)); }
 .filebox select { max-width: 280px; }
 
 /* ---------- controls ---------- */
