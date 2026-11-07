@@ -279,7 +279,7 @@ export async function exportUrl(url) {
     const r = await api(base.href);
     const rows = r.opps.flatMap(o => o.quotes.flatMap(q => q.bids.map(b => ({
       opp_number: o.opp_number, forecast_category_name: o.forecast, account: o.account, opp_total: o.total, opp_value_usd: o.value_usd,
-      quotenumber: q.quotenumber, Bid_Item: b.bid_item, product: b.product, "TCE Proximity": b.proximity, bid_item_value_usd: b.value_usd }))));
+      quotenumber: q.quotenumber, Bid_Item: b.bid_item, product: b.product, "TCE Proximity": b.proximity, "Bid Item Price (USD)": b.value_usd }))));
     return writeXlsx({ "TCE Proximity": rows }, "TCE_Proximity_ranking.xlsx");
   }
   if (path === "/api/export/bids.xlsx") return writeXlsx({ Bids: await api(base.href) }, "TCE_Proximity_bids.xlsx");

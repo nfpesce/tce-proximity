@@ -16,7 +16,7 @@ import { api as localApi, exportUrl, loadFile as localLoad, initEngine, pickFile
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const view = $("#view");
-const state = { meta: null, rankingOpen: {}, fcOpen: {}, depOpen: {} };
+const state = { meta: null, rankingOpen: {}, fcOpen: {}, depOpen: {}, sorts: {} };
 
 // ---------------------------------------------------------------- utils
 function esc(v) {
@@ -33,6 +33,34 @@ function usdShort(n) {
   if (a >= 1e3) return "$" + (n / 1e3).toFixed(1) + " K";
   return "$" + money(n);
 }
+// importes de las tablas de ranking en millones, como el Excel ($4.65M); el valor completo en el tooltip
+const usdM = n => (n === null || n === undefined) ? "" : `<span title="$${money(n)}">$${(n / 1e6).toFixed(2)}M</span>`;
+// Orden por columna (clic en el título): ▲ ascendente · ▼ descendente · ↕ = ordenable.
+// st = { key, dir }; key null = orden original. Primer clic: números de mayor a menor, textos de A a Z.
+function sortTh(label, key, st, cls = "", title = "") {
+  const on = st.key === key;
+  return `<th class="sortable ${cls}" data-sort-key="${esc(key)}"${title ? ` title="${esc(title)}"` : ""}>${label}<span class="sort-ind${on ? " on" : ""}">${on ? (st.dir > 0 ? "▲" : "▼") : "↕"}</span></th>`;
+}
+const pathGet = (r, k) => k.split(".").reduce((o, part) => o?.[part], r);
+const blankVal = v => v === null || v === undefined || v === "";
+function sortRows(rows, st, get = pathGet) {
+  if (!st.key) return rows;
+  return rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => {
+    const x = get(a, st.key), y = get(b, st.key);
+    if (blankVal(x) || blankVal(y)) return blankVal(x) === blankVal(y) ? i - j : blankVal(x) ? 1 : -1;   // vacíos al final
+    const c = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y));
+    return c * st.dir || i - j;
+  }).map(([r]) => r);
+}
+function wireSort(box, st, rows, redraw, get = pathGet) {
+  $$("th[data-sort-key]", box).forEach(th => th.onclick = () => {
+    const k = th.dataset.sortKey;
+    if (st.key === k) st.dir *= -1;
+    else { const v = rows.map(r => get(r, k)).find(x => !blankVal(x)); st.key = k; st.dir = typeof v === "number" ? -1 : 1; }
+    redraw();
+  });
+}
+const sortState = name => state.sorts[name] || (state.sorts[name] = { key: null, dir: 1 });
 const pctFmt = (x, d = 1) => (x === null || x === undefined) ? "" : (100 * x).toFixed(d) + "%";
 const VALUE_HINT = "Bid-item value in USD = sales price × quotelines_quantity / exchange rate (bid_item_value_usd of the query).";
 
@@ -419,7 +447,7 @@ function drawRanking(data, prox, q) {
     <div class="table-wrap"><table>
       <thead><tr><th>opp_number</th><th>forecast_category_name</th><th>opportunities_parentaccountidname</th><th>quotenumber</th><th>Bid_Item</th>
         <th>quotelines_productcategoryname_3</th><th class="num">${linesLabel(data.filters.tce || "all")}</th>
-        <th class="num" title="${esc(VALUE_HINT)}">Bid-item value (USD)</th></tr></thead>
+        <th class="num" title="${esc(VALUE_HINT)}">Bid Item Price (USD)</th></tr></thead>
       <tbody>${rows.join("") || `<tr><td colspan="8" class="empty">No results</td></tr>`}</tbody>
     </table></div>
     <div class="count">${fmt(shownBids)} bid-items shown</div>`;
@@ -596,7 +624,7 @@ async function renderFc(params) {
     <div id="body"><div class="empty">Loading…</div></div>`;
 
   const go = (sel = multi, prox = proxSel, extra = {}) => setHash("fc", "", { ...p, prox: prox.length ? prox.join("|") : "all",
-    express: $("#f-express").value, currency: $("#f-currency").value, sort: params.get("sort") || "", ...multiHash(sel), ...extra });
+    express: $("#f-express").value, currency: $("#f-currency").value, ...multiHash(sel), ...extra });
   ["#f-express", "#f-currency"].forEach(s => $(s).onchange = () => go());
   wireMultiFields(multi, go);
   $$("[data-remove]", $("#sel-prox")).forEach(b => b.onclick = () => go(multi, proxSel.filter(x => x !== b.dataset.remove)));
@@ -616,12 +644,10 @@ async function renderFc(params) {
   const max = Math.max(1, ...data.rows.map(r => r.configs));
   const fcKey = qs;
   const open = state.fcOpen[fcKey] || (state.fcOpen[fcKey] = {});
-  // orden: por cantidad de configs (como el Excel) o por revenue contribution
-  const sortBy = params.get("sort") === "rev" ? "rev" : "configs";
+  // orden: el del Excel (configs desc) o el de la columna elegida (clic en el título)
+  const st = sortState("fc");
   const draw = () => {
-    const list = sortBy === "rev"
-      ? data.rows.slice().sort((a, b) => (b.rev_contrib_usd || 0) - (a.rev_contrib_usd || 0) || a.featurecode.localeCompare(b.featurecode))
-      : data.rows;
+    const list = sortRows(data.rows, st);
     const rows = list.map(r => {
       const pct = data.configs_in_scope ? (100 * r.configs / data.configs_in_scope) : 0;
       let html = `<tr class="fc-row" data-fc="${esc(r.featurecode)}">
@@ -630,12 +656,12 @@ async function renderFc(params) {
         <td class="num">${fmt(r.configs)}</td>
         <td class="num muted">${pct.toFixed(1)}%</td>
         <td><div class="bar"><span style="width:${(100 * r.configs / max).toFixed(1)}%"></span></div></td>
-        <td class="num">${money(r.rev_contrib_usd)}</td>
+        <td class="num">${usdM(r.rev_contrib_usd)}</td>
         <td class="num muted">${pctFmt(r.rev_pct)}</td>
         <td class="num muted">${r.rev_rank}</td>
-        <td class="num">${money(r.value_in_scope_usd)}</td></tr>`;
+        <td class="num">${usdM(r.value_in_scope_usd)}</td></tr>`;
       if (open[r.featurecode]) {
-        html += `<tr class="fc-detail"><td colspan="9"><table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">TCE Proximity</th><th class="num">Bid-item value (USD)</th></tr></thead><tbody>
+        html += `<tr class="fc-detail"><td colspan="9"><table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">TCE Proximity</th><th class="num">Bid Item Price (USD)</th></tr></thead><tbody>
           ${r.bids.map(b => `<tr><td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
             <td class="mono">${esc(b.quotenumber)}</td><td class="mono">${esc(b.opp_number)}</td><td>${esc(b.account)}</td><td>${esc(b.product)}</td><td class="num">${proxBadge(b.proximity)}</td><td class="num">${money(b.value_usd)}</td></tr>`).join("")}
           </tbody></table></td></tr>`;
@@ -649,22 +675,19 @@ async function renderFc(params) {
         <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct feature codes</div></div>
         <div class="kpi" title="${esc(VALUE_HINT)}"><div class="v">${usdShort(data.value_in_scope_usd)}</div><div class="l">Value of configs in scope (USD)</div></div>
       </div>
-      <div class="toolbar"><div class="chips"><span class="muted">Rank by:</span>
-        <button class="chip${sortBy === "configs" ? " on" : ""}" data-sort="configs">Nbr of configs</button>
-        <button class="chip${sortBy === "rev" ? " on" : ""}" data-sort="rev">Rev contrib (USD)</button></div></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>FC</th><th>Description</th><th class="num">Nbr of Configs</th><th class="num">% configs</th><th></th>
-          <th class="num" title="Revenue contribution: USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution of the query)">Rev Contrib (USD)</th>
-          <th class="num" title="Share of the Rev Contrib of the listed FCs">% Rev</th>
-          <th class="num" title="Rank by Rev Contrib">Rank Rev</th>
-          <th class="num" title="USD value of the configs in scope that this FC blocks (what would become TCE if the FC were mapped)">Value of configs in scope (USD)</th></tr></thead>
+        <thead><tr>${sortTh("FC", "featurecode", st)}${sortTh("Description", "description", st)}${sortTh("Nbr of Configs", "configs", st, "num")}${sortTh("% configs", "configs", st, "num")}<th></th>
+          ${sortTh("Rev Contrib (USD)", "rev_contrib_usd", st, "num", "Revenue contribution: USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution of the query)")}
+          ${sortTh("% Rev", "rev_pct", st, "num", "Share of the Rev Contrib of the listed FCs")}
+          ${sortTh("Rank Rev", "rev_rank", st, "num", "Rank by Rev Contrib")}
+          ${sortTh("Value of configs in scope (USD)", "value_in_scope_usd", st, "num", "USD value of the configs in scope that this FC blocks (what would become TCE if the FC were mapped)")}</tr></thead>
         <tbody>${rows || `<tr><td colspan="9" class="empty">No configs match these criteria</td></tr>`}</tbody>
       </table></div>`;
     $$("tr.fc-row", $("#body")).forEach(tr => tr.onclick = e => {
       if (e.target.closest("a")) return;
       open[tr.dataset.fc] = !open[tr.dataset.fc]; draw();
     });
-    $$(".chip[data-sort]", $("#body")).forEach(c => c.onclick = () => go(multi, proxSel, { sort: c.dataset.sort === "rev" ? "rev" : "" }));
+    wireSort($("#body"), st, data.rows, draw);
   };
   draw();
 }
@@ -673,7 +696,6 @@ async function renderFc(params) {
 async function renderDependency(params) {
   const multi = multiParams(params, ["products"]);
   const p = commonParams(params);
-  const sortBy = params.get("sort") === "rev" ? "rev" : "configs";
   view.innerHTML = `
     <div class="view-head"><h2>TCE Dependency - Feature Codes Most Relied On by TCE Configs</h2>
       <span class="hint">Feature codes (TCE_Actual = Y) present in the configurations that are fully TCE (TCE Proximity = 0).
@@ -685,7 +707,7 @@ async function renderDependency(params) {
     </div>
     <div id="body"><div class="empty">Loading…</div></div>`;
   const go = (sel = multi, extra = {}) => setHash("dependency", "", { express: $("#f-express").value, currency: $("#f-currency").value,
-    sort: sortBy === "rev" ? "rev" : "", ...multiHash(sel), ...extra });
+    ...multiHash(sel), ...extra });
   ["#f-express", "#f-currency"].forEach(s => $(s).onchange = () => go());
   wireMultiFields(multi, go);
   const qs = multiQs(new URLSearchParams({ express: p.express, currency: p.currency }), multi).toString();
@@ -697,12 +719,11 @@ async function renderDependency(params) {
   const open = state.depOpen[qs] || (state.depOpen[qs] = {});
   const configs = {};  // detalle por FC (se pide al abrir la fila)
   const max = Math.max(1, ...data.rows.map(r => r.configs));
-  const list = sortBy === "rev"
-    ? data.rows.slice().sort((a, b) => (b.rev_tce_usd || 0) - (a.rev_tce_usd || 0) || a.featurecode.localeCompare(b.featurecode))
-    : data.rows;
+  const st = sortState("dependency");
   const LIMIT = 300;
   let showAll = false;
   const draw = () => {
+    const list = sortRows(data.rows, st);
     const shown = showAll ? list : list.slice(0, LIMIT);
     const rows = shown.map(r => {
       let html = `<tr class="fc-row" data-fc="${esc(r.featurecode)}">
@@ -711,13 +732,13 @@ async function renderDependency(params) {
         <td class="num">${fmt(r.configs)}</td>
         <td class="num muted">${pctFmt(r.pct)}</td>
         <td><div class="bar"><span style="width:${(100 * r.configs / max).toFixed(1)}%"></span></div></td>
-        <td class="num">${money(r.rev_all_usd)}</td>
-        <td class="num">${money(r.rev_tce_usd)}</td>
+        <td class="num">${usdM(r.rev_all_usd)}</td>
+        <td class="num">${usdM(r.rev_tce_usd)}</td>
         <td class="num muted">${pctFmt(r.tce_share)}</td>
         <td class="num muted">${r.rev_tce_rank}</td></tr>`;
       if (open[r.featurecode]) {
         const c = configs[r.featurecode];
-        html += `<tr class="fc-detail"><td colspan="9">${!c ? `<div class="empty">Loading…</div>` : `<table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">Bid-item value (USD)</th></tr></thead><tbody>
+        html += `<tr class="fc-detail"><td colspan="9">${!c ? `<div class="empty">Loading…</div>` : `<table><thead><tr><th>Bid_Item</th><th>quotenumber</th><th>opp_number</th><th>Account</th><th>Product</th><th class="num">Bid Item Price (USD)</th></tr></thead><tbody>
           ${c.slice(0, 500).map(b => `<tr><td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
             <td class="mono">${esc(b.quotenumber)}</td><td class="mono">${esc(b.opp_number)}</td><td>${esc(b.account)}</td><td>${esc(b.product)}</td><td class="num">${money(b.value_usd)}</td></tr>`).join("")}
           </tbody></table>${c.length > 500 ? `<div class="count">Showing the 500 highest-value of ${fmt(c.length)} TCE configs.</div>` : ""}`}</td></tr>`;
@@ -731,15 +752,12 @@ async function renderDependency(params) {
         <div class="kpi"><div class="v">${fmt(data.rows.length)}</div><div class="l">Distinct feature codes</div></div>
         <div class="kpi" title="${esc(VALUE_HINT)}"><div class="v">${usdShort(data.tce_value_in_scope_usd)}</div><div class="l">Value of TCE configs (USD)</div></div>
       </div>
-      <div class="toolbar"><div class="chips"><span class="muted">Rank by:</span>
-        <button class="chip${sortBy === "configs" ? " on" : ""}" data-sort="configs">Nbr of TCE configs</button>
-        <button class="chip${sortBy === "rev" ? " on" : ""}" data-sort="rev">Rev contrib TCE Sel (USD)</button></div></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>FC</th><th>Description</th><th class="num">Nbr of TCE Configs</th><th class="num">% of TCE configs</th><th></th>
-          <th class="num" title="USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution)">Rev Contrib All Configs (USD)</th>
-          <th class="num" title="USD value of the fully TCE configurations with this FC (Revenue_Contribution_TCE_Sel)">Rev Contrib TCE Sel (USD)</th>
-          <th class="num" title="Share of the FC's revenue that already sits in TCE configs">TCE Sel / All</th>
-          <th class="num" title="Rank by Rev Contrib TCE Sel">Rank Rev</th></tr></thead>
+        <thead><tr>${sortTh("FC", "featurecode", st)}${sortTh("Description", "description", st)}${sortTh("Nbr of TCE Configs", "configs", st, "num")}${sortTh("% of TCE configs", "pct", st, "num")}<th></th>
+          ${sortTh("Rev Contrib All Configs (USD)", "rev_all_usd", st, "num", "USD value of every configuration with this FC within the filters, TCE or not (revenue_contribution)")}
+          ${sortTh("Rev Contrib TCE Sel (USD)", "rev_tce_usd", st, "num", "USD value of the fully TCE configurations with this FC (Revenue_Contribution_TCE_Sel)")}
+          ${sortTh("TCE Sel / All", "tce_share", st, "num", "Share of the FC's revenue that already sits in TCE configs")}
+          ${sortTh("Rank Rev", "rev_tce_rank", st, "num", "Rank by Rev Contrib TCE Sel")}</tr></thead>
         <tbody>${rows || `<tr><td colspan="9" class="empty">No TCE configs match these filters</td></tr>`}</tbody>
       </table></div>
       <div class="count">${fmt(shown.length)} of ${fmt(list.length)} feature codes${list.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
@@ -754,7 +772,7 @@ async function renderDependency(params) {
       }
     });
     $("#show-all")?.addEventListener("click", e => { e.preventDefault(); showAll = true; draw(); });
-    $$(".chip[data-sort]", $("#body")).forEach(c => c.onclick = () => go(multi, { sort: c.dataset.sort === "rev" ? "rev" : "" }));
+    wireSort($("#body"), st, data.rows, draw);
   };
   draw();
 }
@@ -825,37 +843,43 @@ async function renderWw(params) {
   const changeFiles = `<button class="btn small" id="ww-change">Change geo files…</button>`;
   const geos = data.geos;
   const d = data[part];
+  d.rows.forEach((x, i) => { x._rank = i + 1; });   // rank WW (orden del Excel), se mantiene al reordenar
+  const st = sortState("ww_" + part);
+  // por geo: sin valor = 0 (la geo no tiene ese FC)
+  const getWw = (r, k) => { const v = pathGet(r, k); return v === undefined && k.includes(".") ? 0 : v; };
   const LIMIT = 300;
   let showAll = false;
   const sources = geos.map(g => `<span class="sel-chip" title="${esc(data.files[g])}">${esc(g)}: ${esc(data.files[g])}</span>`).join("")
     + (data.missing_geos.length ? ` <span class="muted">No file for ${esc(data.missing_geos.join(", "))}</span>` : "");
   const draw = () => {
-    const shown = showAll ? d.rows : d.rows.slice(0, LIMIT);
+    const list = sortRows(d.rows, st, getWw);
+    const shown = showAll ? list : list.slice(0, LIMIT);
+    const th = (label, key, title = "") => sortTh(label, key, st, key === "featurecode" || key === "description" ? "" : "num", title);
     let head, body;
     if (part === "proximity") {
       head = `<tr><th colspan="3"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th></tr>
-        <tr><th class="num">Rank</th><th>FC</th><th>Description</th><th class="num">Total WW</th>${geos.map(g => `<th class="num">${esc(g)}</th>`).join("")}
-        <th class="num"># Geos</th><th class="num">% of WW</th><th class="num">Cum. %</th>
-        <th class="num">Rev Contrib WW</th>${geos.map(g => `<th class="num">${esc(g)}</th>`).join("")}<th class="num">% of WW Rev</th><th class="num">Rank Rev</th></tr>`;
-      body = shown.map((x, i) => `<tr><td class="num muted">${i + 1}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
+        <tr>${th("Rank", "_rank")}${th("FC", "featurecode")}${th("Description", "description")}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
+        ${th("# Geos", "n_geos")}${th("% of WW", "pct")}${th("Cum. %", "cum_pct", "Cumulative % in the WW ranking order")}
+        ${th("Rev Contrib WW", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}</tr>`;
+      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td><td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td><td class="num muted">${pctFmt(x.cum_pct)}</td>
-        <td class="num"><strong>${money(x.rev_contrib_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_contrib_usd[g] ? "" : " zero"}">${money(x.rev_contrib_usd[g] || 0)}</td>`).join("")}
+        <td class="num"><strong>${usdM(x.rev_contrib_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_contrib_usd[g] ? "" : " zero"}">${usdM(x.rev_contrib_usd[g] || 0)}</td>`).join("")}
         <td class="num muted">${pctFmt(x.rev_pct)}</td><td class="num muted">${x.rev_rank}</td></tr>`).join("");
     } else {
       head = `<tr><th colspan="3"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th></tr>
-        <tr><th class="num">Rank</th><th>FC</th><th>Description</th><th class="num">Total WW</th>${geos.map(g => `<th class="num">${esc(g)}</th>`).join("")}
-        <th class="num"># Geos</th><th class="num">% of WW</th>
-        <th class="num">All WW</th>${geos.map(g => `<th class="num">${esc(g)}</th>`).join("")}
-        <th class="num">TCE Sel WW</th>${geos.map(g => `<th class="num">${esc(g)}</th>`).join("")}
-        <th class="num">TCE Sel / All</th><th class="num">Rank Rev</th></tr>`;
-      body = shown.map((x, i) => `<tr><td class="num muted">${i + 1}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
+        <tr>${th("Rank", "_rank")}${th("FC", "featurecode")}${th("Description", "description")}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
+        ${th("# Geos", "n_geos")}${th("% of WW", "pct")}
+        ${th("All WW", "rev_all_usd_ww")}${geos.map(g => th(esc(g), "rev_all_usd." + g)).join("")}
+        ${th("TCE Sel WW", "rev_tce_usd_ww")}${geos.map(g => th(esc(g), "rev_tce_usd." + g)).join("")}
+        ${th("TCE Sel / All", "tce_share")}${th("Rank Rev", "rev_tce_rank")}</tr>`;
+      body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this FC">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td><td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td>
-        <td class="num"><strong>${money(x.rev_all_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_all_usd[g] ? "" : " zero"}">${money(x.rev_all_usd[g] || 0)}</td>`).join("")}
-        <td class="num"><strong>${money(x.rev_tce_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_tce_usd[g] ? "" : " zero"}">${money(x.rev_tce_usd[g] || 0)}</td>`).join("")}
+        <td class="num"><strong>${usdM(x.rev_all_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_all_usd[g] ? "" : " zero"}">${usdM(x.rev_all_usd[g] || 0)}</td>`).join("")}
+        <td class="num"><strong>${usdM(x.rev_tce_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_tce_usd[g] ? "" : " zero"}">${usdM(x.rev_tce_usd[g] || 0)}</td>`).join("")}
         <td class="num muted">${pctFmt(x.tce_share)}</td><td class="num muted">${x.rev_tce_rank}</td></tr>`).join("");
     }
     $("#body").innerHTML = `
@@ -868,6 +892,7 @@ async function renderWw(params) {
       <div class="table-wrap"><table class="one-line"><thead>${head}</thead>
         <tbody>${body || `<tr><td colspan="20" class="empty">No feature codes</td></tr>`}</tbody></table></div>
       <div class="count">${fmt(shown.length)} of ${fmt(d.rows.length)} feature codes${d.rows.length > shown.length ? ` · <a href="#" id="show-all">show all</a> (or export)` : ""}</div>`;
+    wireSort($("#body"), st, d.rows, draw, getWw);
     $("#show-all")?.addEventListener("click", e => { e.preventDefault(); showAll = true; draw(); });
     $("#ww-change")?.addEventListener("click", () => wwChoose(""));
   };
@@ -889,7 +914,7 @@ const BID_COLS = [
   { key: "contract_start", label: "Contract start" },
   { key: "quotelines_quantity", label: "quotelines_quantity", num: true },
   { key: "tot_lines_qty", label: "tot_lines_qty", num: true },
-  { key: "value_usd", label: "Bid-item value (USD)", num: true, title: VALUE_HINT },
+  { key: "value_usd", label: "Bid Item Price (USD)", num: true, title: VALUE_HINT },
   { key: "total_final_price", label: "Total quote (final price)", num: true, title: "totalfinalprice: total of the whole quote, in the quote currency" },
 ];
 
@@ -953,7 +978,7 @@ async function renderBids(params) {
     const shown = rows.slice(0, 2000);
     $("#body").innerHTML = `
       <div class="table-wrap"><table class="one-line">
-        <thead><tr>${BID_COLS.map(c => `<th class="sortable ${c.num ? "num" : ""}" data-k="${c.key}"${c.title ? ` title="${esc(c.title)}"` : ""}>${c.label}${st.sort === c.key ? (st.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead>
+        <thead><tr>${BID_COLS.map(c => sortTh(c.label, c.key, { key: st.sort, dir: st.dir }, c.num ? "num" : "", c.title || "")).join("")}</tr></thead>
         <tbody>${shown.map(b => `<tr>
           <td class="num muted">${b.rank}</td><td class="num">${proxBadge(b.proximity)}</td>
           <td class="mono"><a href="#/quote/${encodeURIComponent(b.quotenumber)}?bid=${encodeURIComponent(b.bid_item)}" title="${esc(b.bid_item)}">${esc(itemLabel(b.bid_item))}</a></td>
@@ -964,7 +989,7 @@ async function renderBids(params) {
       </table></div>
       <div class="count">${fmt(rows.length)} of ${fmt(data.length)} bid-items${rows.length > shown.length ? " (showing the first 2,000; use the filters or export)" : ""}</div>`;
     $$("th.sortable", $("#body")).forEach(th => th.onclick = () => {
-      if (st.sort === th.dataset.k) st.dir *= -1; else { st.sort = th.dataset.k; st.dir = 1; }
+      if (st.sort === th.dataset.sortKey) st.dir *= -1; else { st.sort = th.dataset.sortKey; st.dir = BID_COLS.find(c => c.key === st.sort)?.num ? -1 : 1; }
       draw();
     });
   };

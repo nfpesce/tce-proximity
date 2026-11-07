@@ -186,6 +186,8 @@ thead tr.filters input, thead tr.filters select { width: 100%; padding: 3px 6px;
 thead tr.filters select { min-width: 72px; }
 thead th.sortable { cursor: pointer; user-select: none; }
 thead th.sortable:hover { color: var(--link); }
+.sort-ind { margin-left: 4px; font-size: 10px; color: var(--muted); opacity: .55; }
+.sort-ind.on { opacity: 1; color: var(--accent); }
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 th.center, td.center { text-align: center; }
 tbody tr:hover td { background: var(--row-hover); }
