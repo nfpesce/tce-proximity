@@ -26,6 +26,7 @@
       <a href="#/adjustments" data-view="adjustments">7. Adjustments</a>
     </nav>
     <div class="filebox">
+      <label>Data</label>
       <div class="seg" id="source-seg" role="group" aria-label="Data source" title="Data source: quotes (one file per geo) or shipments (one .csv with all geos, analysed by SBB)">
         <button type="button" data-source="quotes" aria-pressed="true" class="on">Quotes</button><button type="button" data-source="shipments" aria-pressed="false">Shipments</button>
       </div>
@@ -33,6 +34,8 @@
       <select id="geo-select" hidden title="Shipments geo (Europe + META = EMEA of quotes)"></select>
       <span class="local-badge" title="The file is processed in this browser and never uploaded">Local data</span>
       <span class="file-name" id="file-name">No file open</span>
+      <select id="file-select" hidden title="Quotes file (geo) of the open data folder"></select>
+      <a id="data-btn" class="btn ghost" href="#/data" title="Open a data folder: one quotes file per geo + the shipments file (CSV query output or .xlsx)">Data folder…</a>
       <button id="open-btn" class="btn">Open file…</button>
       <input type="file" id="file-input" accept=".xlsx,.csv" hidden>
     </div>

@@ -7,6 +7,7 @@
  *   #/dependency?express=all&currency=all&products=A|B   hoja "Ranking TCE Depenency" (FCs de las configs full TCE)
  *   #/bids?express=No&currency=USD&products=A|B&countries=..&forecasts=..   ranking plano de bids
  *   #/ww?prox=1          "TCE Proximity WW Detractors Ranking" (las 4 geos)
+ *   #/data               carpeta de datos: importar una carpeta (CSV de las queries o .xlsx), historial
  * Defaults de Express / Currency desde Oct 28: All (como la hoja Methodology). Importes en USD (bid_item_value_usd).
  * Origen de datos (selector del encabezado): Quotes o Shipments. En Shipments el mismo análisis es por SBB
  * (FC como referencia), configuración = mfgsoline, orden = SO y la geo se elige en el encabezado (LABELS / L).
@@ -14,7 +15,8 @@
 import { api as localApi, exportUrl, loadFile as localLoad, initEngine, pickFile, reopenLast, lastHandle,
          canPickFiles, exportAdjustmentsFile, importAdjustmentsFile, setProgressHandler,
          pickWwFiles, reopenWwFiles, lastWwHandles, setWwFiles,
-         selectGeo as localGeo, switchSource as localSwitch, SHIP_GEOS } from "./api.js";
+         selectGeo as localGeo, switchSource as localSwitch, SHIP_GEOS,
+         openFolder, currentFolder, lastFolderHandle, lastFolderFormat, canPickFolder, selectQuotesFile } from "./api.js";
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -326,6 +328,11 @@ function drawSource() {
   state.source = src;
   $$("#source-seg [data-source]").forEach(b => { b.classList.toggle("on", b.dataset.source === src); b.setAttribute("aria-pressed", String(b.dataset.source === src)); });
   $("#geo-label").hidden = $("#geo-select").hidden = !(ship && state.meta);
+  // carpeta abierta: elegir el archivo de quotes (geo) de la carpeta
+  const fo = currentFolder(), fs = $("#file-select");
+  fs.hidden = ship || !fo || !state.meta;
+  if (!fs.hidden) fs.innerHTML = fo.quoteFiles.map(x => `<option${x.name === state.meta.file ? " selected" : ""}>${esc(x.name)}</option>`).join("");
+  $("#file-name").hidden = !fs.hidden;
   if (ship && state.meta) $("#geo-select").innerHTML = SHIP_GEOS.map(g => `<option${g === state.meta.geo ? " selected" : ""}>${esc(g)}</option>`).join("");
   $$("#tabs a").forEach(a => { const t = TAB_TEXT[a.dataset.view]; if (t) a.textContent = t[ship ? 1 : 0]; });
 }
@@ -358,6 +365,12 @@ $$("#source-seg [data-source]").forEach(b => b.addEventListener("click", async (
   $("#meta-line").textContent = "No file open";
   render();
 }));
+$("#file-select").addEventListener("change", async e => {
+  loading(true, `Reading ${e.target.value}…`);
+  try { await selectQuotesFile(e.target.value); toast("Active file: " + e.target.value); }
+  catch (err) { toast(err.message, true); } finally { loading(false); }
+  afterSourceChange();
+});
 $("#geo-select").addEventListener("change", async e => {
   loading(true, `Loading shipments ${e.target.value}…`);
   try { await localGeo(e.target.value); toast(`Shipments · ${e.target.value}`); }
@@ -412,6 +425,7 @@ async function renderWelcome() {
       <div class="welcome-actions">
         ${last ? `<button class="btn primary" id="w-reopen">Reopen ${esc(last.name)}</button>` : ""}
         <button class="btn${last ? "" : " primary"}" id="w-open">Open data file…</button>
+        <a class="btn" href="#/data" title="A folder with one quotes file per geo + the shipments file (CSV or .xlsx)">Open data folder…</a>
       </div>
       <div class="privacy"><strong>Your data stays on this computer.</strong> The file is read and processed by your
         browser only; it is never uploaded to any server. TCE adjustments are saved in this browser.</div>
@@ -1272,12 +1286,85 @@ async function renderAdjustments(fc) {
   if (!fc) input.focus();
 }
 
+// ------------------------------------------------------- Data folder (carpeta local, en el navegador)
+const fmtLabel = f => ({ csv: "CSV (raw query output)", xlsx: "Excel workbooks (.xlsx)" }[f] || f);
+function scanHtml(s) {
+  const rows = s.files.map(f => `<tr${f.used ? "" : ' class="muted"'}><td>${f.kind === "quotes" ? "Quotes" : "Shipments"}</td>
+    <td>${esc(f.geo)}</td><td class="mono">${esc(f.name)}</td><td class="num">${fmt(f.size_mb)} MB</td>
+    <td>${f.used ? "✔ used" : "older file of the same geo (not used)"}</td></tr>`).join("");
+  const miss = [...s.missing_geos.map(g => `quotes ${g}`), ...(s.shipments ? [] : ["shipments"])];
+  return `
+    <div class="table-wrap short"><table>
+      <thead><tr><th>Data</th><th>Geo</th><th>File</th><th class="num">Size</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="empty">No ${esc(s.format.toUpperCase())} data files found in this folder</td></tr>`}</tbody>
+    </table></div>
+    ${miss.length ? `<div class="count warn-text">Not found: ${esc(miss.join(", "))}.</div>` : ""}
+    ${s.ignored.length ? `<details class="count"><summary>${s.ignored.length} file${s.ignored.length > 1 ? "s" : ""} ignored</summary>
+      <ul>${s.ignored.map(x => `<li><span class="mono">${esc(x.name)}</span>: ${esc(x.reason)}</li>`).join("")}</ul></details>` : ""}`;
+}
+
+async function openFolderUi(dirOrFiles, format) {
+  loading(true, "Reading the folder… (each file is read in this browser; large files take a few seconds)");
+  try {
+    const report = await openFolder(dirOrFiles, format);
+    state.rankingOpen = {}; state.fcOpen = {}; state.depOpen = {};
+    await loadMeta();
+    toast(`Opened folder ${report.folder}: ${report.files.filter(f => f.used).length} files (processed locally)`);
+    return report;
+  } catch (e) { toast(e.message, true); return null; }
+  finally { loading(false); }
+}
+
+async function renderData() {
+  const f = currentFolder();
+  const last = canPickFolder() ? await lastFolderHandle() : null;
+  let format = f?.format || lastFolderFormat();
+  view.innerHTML = `
+    <div class="view-head"><h2>Data folder</h2>
+      <span class="hint">Open a folder with one quotes file per geo (NA, AP, LA, EMEA; the geo is taken from the start of the
+        file name) and the shipments WW file. The files are identified by their columns and read by this browser only (never
+        uploaded); the browser remembers the folder to reopen it next time. TCE adjustments are kept apart.</span></div>
+    <div class="fc-card"><div class="k">Data in use</div>
+      <div class="fc-usage">${f ? `Folder <span class="mono">${esc(f.name)}</span> · ${esc(fmtLabel(f.format))}`
+        : state.meta ? `Single file <span class="mono">${esc(state.meta.file)}</span>` : "No data open"}</div>
+      ${f ? scanHtml(f.report) : ""}</div>
+    <h3 class="section">Open a folder</h3>
+    <div class="toolbar">
+      <div class="field"><label>Format</label><div class="seg" id="ds-format" role="group" aria-label="File format">
+        <button type="button" data-format="csv" title="One .csv per geo with the raw output of the quotes query + the shipments .csv">CSV (raw query output)</button><button type="button" data-format="xlsx" title="Previous format: one .xlsx extraction workbook per geo (data in the first sheet)">Excel (.xlsx)</button></div></div>
+      ${last ? `<button class="btn primary" id="ds-reopen">Reopen ${esc(last.name)}</button>` : ""}
+      <button class="btn${last ? "" : " primary"}" id="ds-open">Choose folder…</button>
+      <input type="file" id="ds-input" webkitdirectory multiple hidden>
+    </div>`;
+  const setFormat = v => { format = v; $$("#ds-format [data-format]").forEach(b => b.classList.toggle("on", b.dataset.format === v)); };
+  setFormat(format);
+  $$("#ds-format [data-format]").forEach(b => b.onclick = () => setFormat(b.dataset.format));
+  const after = r => { if (r) { location.hash = "#/data"; renderData(); } };
+  $("#ds-open").onclick = async () => {
+    if (canPickFolder()) {
+      try { return after(await openFolderUi(await window.showDirectoryPicker({ mode: "read" }), format)); }
+      catch (e) { if (e.name === "AbortError") return; }
+    }
+    $("#ds-input").click();
+  };
+  $("#ds-input").onchange = async e => { const files = [...e.target.files]; e.target.value = ""; if (files.length) after(await openFolderUi(files, format)); };
+  if (last) $("#ds-reopen").onclick = async () => {
+    try {
+      const h = await lastFolderHandle();
+      if (!h || !((await h.queryPermission?.({ mode: "read" })) === "granted" || (await h.requestPermission?.({ mode: "read" })) === "granted"))
+        return toast("Permission to read the folder was not granted. Use 'Choose folder…'.", true);
+      after(await openFolderUi(h, format));
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
 // ---------------------------------------------------------------- router
 let renderSeq = 0;
 async function render() {
   const { route, arg, params } = parseHash();
   const seq = ++renderSeq;
   $$("#tabs a").forEach(a => a.classList.toggle("active", a.dataset.view === route));
+  if (route === "data") return renderData();
   if (!state.meta) return renderWelcome();
   if (seq !== renderSeq) return;
   if (route === "quote") return renderQuote(arg, params);

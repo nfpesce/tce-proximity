@@ -21,7 +21,11 @@ it must never contain data files (see `.gitignore`).
    **Quotes / Shipments** selector at the top. The same analysis is done by SBB (FC and basic name as reference;
    configuration = mfgsoline, order = SO). Pick the geo at the top (NA, AP, LA, Europe, META; PRC is not included);
    the WW Ranking uses the 5 geos of the same file. Shipments adjustments are kept apart from the quotes ones.
-6. TCE adjustments are saved in the browser (localStorage). Use **Export adjustments / Import…** in tab 7 to move
+6. **Data folder…**: open a whole folder instead of single files: one quotes file per geo (NA, AP, LA, EMEA) and the
+   shipments WW file, as **CSV** (raw query output) or **Excel (.xlsx)** (previous format). The files are identified by
+   their columns, the geo selector, the WW Ranking and Shipments then work without choosing files again, and the browser
+   remembers the folder (Edge/Chrome) to reopen it with one click.
+7. TCE adjustments are saved in the browser (localStorage). Use **Export adjustments / Import…** in tab 7 to move
    them to another computer or browser (same `tce_overrides.json` format as the Python version). An adjustment is
    removed automatically when a newer data file brings a different source value for that feature code.
 

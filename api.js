@@ -7,8 +7,11 @@
  * <input type=file>) y el ranking WW con los archivos de las 4 geos.
  * Shipments: el CSV de shipments (todas las geos) se detecta por sus columnas; la geo se elige con selectGeo()
  * y el WW usa las 5 geos del mismo archivo (sin elegir archivos).
+ * Carpeta de datos (openFolder): un archivo de quotes por geo + el de shipments WW, en formato CSV (salida cruda de
+ * las queries) o XLSX; se identifican por sus columnas (como scan_folder en app/data.py) y se recuerda la carpeta.
  */
 import * as engine from "./engine.js";
+import { xlsxHeader } from "./xlsx.js";
 
 const SHEETJS_URL = "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs";
 
@@ -469,9 +472,122 @@ async function selectGeoImpl(geo) {
 /** Vuelve a un origen ya abierto en esta sesión (true) o indica que hay que abrir un archivo (false) */
 export const switchSource = serial(async (source, geo) => {
   if (source === engine.currentSource()) return true;
-  if (source === "shipments" && engine.shipFile()) { await selectGeoImpl(geo || engine.SHIP_GEOS[0]); return true; }
-  if (source === "quotes" && fileBySource.quotes) { await loadFileImpl(fileBySource.quotes); return true; }
+  if (source === "shipments" && engine.shipFile() && (!fileBySource.shipments || engine.shipFile() === fileBySource.shipments.name)) {
+    await selectGeoImpl(geo || engine.SHIP_GEOS[0]); return true;
+  }
+  if (fileBySource[source]) { await loadFileImpl(fileBySource[source]); return true; }   // ej. shipments de la carpeta
   return false;
+});
+
+// ============================================================ carpeta de datos (CSV de las queries o .xlsx)
+export const IMPORT_FORMATS = {
+  csv: { label: "CSV (raw query output)", quotes: [".csv"], shipments: [".csv"] },
+  xlsx: { label: "Excel workbooks (.xlsx)", quotes: [".xlsx"], shipments: [".xlsx", ".csv"] },
+};
+const QUOTE_COLS = engine.EXPECTED_COLUMNS, SHIP_COLS = engine.SHIP_COLUMNS;
+const suffix = name => (/\.[^.]+$/.exec(name)?.[0] || "").toLowerCase();
+/** CSV: encabezado (primera línea) y geo de las primeras filas, leyendo sólo el principio del archivo */
+async function csvHead(file) {
+  const text = await file.slice(0, 1 << 18).text();
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  const split = l => { const out = []; let cur = "", q = false;
+    for (let i = 0; i < l.length; i++) { const c = l[i];
+      if (q) { if (c === '"') { if (l[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+      else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c; }
+    out.push(cur); return out; };
+  const header = split(lines[0] || "");
+  const gi = header.indexOf("geo"), count = {};
+  if (gi >= 0) for (const l of lines.slice(1, -1)) { const g = split(l)[gi]; if (engine.GEOS.includes(g)) count[g] = (count[g] || 0) + 1; }
+  const geo = Object.entries(count).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  return { header, sheets: [], geo };
+}
+/** Identifica los archivos de la carpeta (misma lógica que scan_folder en Python) */
+export async function scanFiles(files, format = "csv", folderName = "") {
+  const spec = IMPORT_FORMATS[format];
+  if (!spec) throw new ApiError(400, `format must be one of: ${Object.keys(IMPORT_FORMATS).join(", ")}`);
+  const list = [...files].filter(f => !f.name.startsWith("~$") && [".csv", ".xlsx"].includes(suffix(f.name)))
+    .sort((a, b) => b.lastModified - a.lastModified);
+  const quotes = {}, found = [], ignored = [];
+  let shipments = null;
+  const other = (kind, suf) => Object.keys(IMPORT_FORMATS).find(k => IMPORT_FORMATS[k][kind].includes(suf)) || "";
+  for (const f of list) {
+    const suf = suffix(f.name);
+    let head;
+    try { head = suf === ".csv" ? await csvHead(f) : { ...(await xlsxHeader(f)), geo: "" }; }
+    catch (e) { ignored.push({ name: f.name, reason: `cannot be read (${e.message})` }); continue; }
+    const size = Math.round(f.size / 1e5) / 10;
+    const isSummary = head.sheets.some(s => s.toLowerCase().includes("ranking"));
+    const isQuotes = QUOTE_COLS.every(c => head.header.includes(c));
+    const isShip = SHIP_COLS.every(c => head.header.includes(c)) && !isSummary;
+    const kind = isQuotes ? "quotes" : isShip ? "shipments" : null;
+    if (kind && !spec[kind].includes(suf)) { ignored.push({ name: f.name, reason: `${kind} data as ${suf}: used with the ${other(kind, suf).toUpperCase()} format` }); continue; }
+    if (isQuotes) {
+      const geo = engine.geoFromName(f.name) || head.geo;
+      if (!engine.GEOS.includes(geo)) { ignored.push({ name: f.name, reason: "quotes data, but the geo is unknown (name it 'NA ...', 'AP ...', 'LA ...' or 'EMEA ...')" }); continue; }
+      const used = !(geo in quotes);
+      if (used) quotes[geo] = f;
+      found.push({ name: f.name, kind: "quotes", geo, size_mb: size, used });
+    } else if (isShip) {
+      const used = !shipments;
+      shipments = shipments || f;
+      found.push({ name: f.name, kind: "shipments", geo: "WW", size_mb: size, used });
+    } else if (isSummary) ignored.push({ name: f.name, reason: "analysis workbook (ranking sheets); the app reproduces it" });
+    else ignored.push({ name: f.name, reason: "not a quotes or shipments extraction (columns do not match)" });
+  }
+  const geos = engine.GEOS.filter(g => g in quotes);
+  return {
+    report: { folder: folderName, format, format_label: spec.label, quotes: Object.fromEntries(geos.map(g => [g, quotes[g].name])),
+              missing_geos: engine.GEOS.filter(g => !(g in quotes)), shipments: shipments?.name ?? null, files: found, ignored },
+    quoteFiles: geos.map(g => quotes[g]), shipmentsFile: shipments,
+  };
+}
+
+let folder = null;   // carpeta activa: { name, format, report, quoteFiles }
+export const currentFolder = () => folder;
+const FORMAT_KEY = "tce_folder_format";
+export const lastFolderFormat = () => { try { return localStorage.getItem(FORMAT_KEY) || "csv"; } catch { return "csv"; } };
+export const lastFolderHandle = () => idb("readonly", s => s.get("dir")).catch(() => null);
+export const canPickFolder = () => typeof window.showDirectoryPicker === "function";
+async function dirFiles(dir) {
+  const out = [];
+  for await (const h of dir.values()) if (h.kind === "file") out.push(await h.getFile());
+  return out;
+}
+/** Abre una carpeta (FileSystemDirectoryHandle o lista de archivos): identifica los archivos, carga quotes
+ *  (la geo que estaba activa o NA) y deja shipments y el WW listos sin volver a elegir archivos. */
+export const openFolder = serial(async (dirOrFiles, format = "csv", { remember = true } = {}) => {
+  const isHandle = typeof dirOrFiles?.values === "function" && dirOrFiles.kind === "directory";
+  const files = isHandle ? await dirFiles(dirOrFiles) : [...dirOrFiles];
+  const name = isHandle ? dirOrFiles.name : (files[0]?.webkitRelativePath || "").split("/")[0] || "folder";
+  const { report, quoteFiles, shipmentsFile } = await scanFiles(files, format, name);
+  if (!quoteFiles.length && !shipmentsFile)
+    throw new ApiError(422, `No ${format.toUpperCase()} quotes or shipments data files found in ${name}`);
+  const prevGeo = engine.currentSource() === "quotes" ? engine.geoFromName(engine.currentFile() || "") : "";
+  const start = quoteFiles.find(f => engine.geoFromName(f.name) === (prevGeo || "NA")) || quoteFiles[0];
+  const wantShip = engine.currentSource() === "shipments" || !start;
+  fileBySource.quotes = start || null;
+  fileBySource.shipments = shipmentsFile || null;
+  setWwFiles(quoteFiles);
+  await loadFileImpl(wantShip && shipmentsFile ? shipmentsFile : start);
+  folder = { name, format, report, quoteFiles };
+  if (remember) {
+    if (isHandle) await saveHandle(dirOrFiles, "dir");
+    try { localStorage.setItem(FORMAT_KEY, format); } catch { /* sin storage */ }
+  }
+  return report;
+});
+/** Reabre la última carpeta (requiere un clic del usuario para el permiso de lectura) */
+export async function reopenFolder(format) {
+  const h = await lastFolderHandle();
+  if (!h || !(await granted(h))) return null;
+  return openFolder(h, format || lastFolderFormat());
+}
+/** Otra geo de quotes de la carpeta activa */
+export const selectQuotesFile = serial(async name => {
+  const f = folder?.quoteFiles.find(x => x.name === name);
+  if (!f) throw new ApiError(404, `${name} not found in the folder`);
+  fileBySource.quotes = f;
+  return loadFileImpl(f);
 });
 export const currentSource = () => engine.currentSource();
 export const currentGeo = () => engine.currentGeo();
