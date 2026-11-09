@@ -979,32 +979,37 @@ async function renderWw(params) {
     const shown = showAll ? list : list.slice(0, LIMIT);
     const th = (label, key, title = "") => sortTh(label, key, st, ["featurecode", "description", "ref_fc", "basicname"].includes(key) ? "" : "num", title);
     const refH = isShip() ? th("FC(s)", "ref_fc", "Feature codes of the SBB (fc column)") + th("Basic name", "basicname") : "";
+    // Shipments: unidades despachadas del SBB (sbbqty) por geo y WW, al final de la tabla
+    const U = !!data.has_units;
+    const uGroup = U ? `<th colspan="${geos.length + 1}" class="group" title="Units of this SBB shipped in each geo (sum of sbbqty = qty × sbbusage, all configurations, TCE or not)">Shipped units (sbbqty)</th>` : "";
+    const uHead = U ? th("Units WW", "units_ww", "Units shipped WW (sum of sbbqty)") + geos.map(g => th(esc(g), "units." + g)).join("") : "";
+    const uTd = x => U ? `<td class="num"><strong>${fmt(x.units_ww || 0)}</strong></td>` + geos.map(g => `<td class="num${x.units?.[g] ? "" : " zero"}">${fmt(x.units?.[g] || 0)}</td>`).join("") : "";
     let head, body;
     if (part === "proximity") {
-      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th></tr>
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th>${uGroup}</tr>
         <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}${th("Cum. %", "cum_pct", "Cumulative % in the WW ranking order")}
-        ${th("Rev Contrib WW", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}</tr>`;
+        ${th("Rev Contrib WW", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}${uHead}</tr>`;
       body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td><td class="num muted">${pctFmt(x.cum_pct)}</td>
         <td class="num"><strong>${usdM(x.rev_contrib_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_contrib_usd[g] ? "" : " zero"}">${usdM(x.rev_contrib_usd[g] || 0)}</td>`).join("")}
-        <td class="num muted">${pctFmt(x.rev_pct)}</td><td class="num muted">${x.rev_rank}</td></tr>`).join("");
+        <td class="num muted">${pctFmt(x.rev_pct)}</td><td class="num muted">${x.rev_rank}</td>${uTd(x)}</tr>`).join("");
     } else {
-      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th></tr>
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th>${uGroup}</tr>
         <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}
         ${th("All WW", "rev_all_usd_ww")}${geos.map(g => th(esc(g), "rev_all_usd." + g)).join("")}
         ${th("TCE Sel WW", "rev_tce_usd_ww")}${geos.map(g => th(esc(g), "rev_tce_usd." + g)).join("")}
-        ${th("TCE Sel / All", "tce_share")}${th("Rank Rev", "rev_tce_rank")}</tr>`;
+        ${th("TCE Sel / All", "tce_share")}${th("Rank Rev", "rev_tce_rank")}${uHead}</tr>`;
       body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
         <td class="num">${x.n_geos}</td><td class="num muted">${pctFmt(x.pct)}</td>
         <td class="num"><strong>${usdM(x.rev_all_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_all_usd[g] ? "" : " zero"}">${usdM(x.rev_all_usd[g] || 0)}</td>`).join("")}
         <td class="num"><strong>${usdM(x.rev_tce_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_tce_usd[g] ? "" : " zero"}">${usdM(x.rev_tce_usd[g] || 0)}</td>`).join("")}
-        <td class="num muted">${pctFmt(x.tce_share)}</td><td class="num muted">${x.rev_tce_rank}</td></tr>`).join("");
+        <td class="num muted">${pctFmt(x.tce_share)}</td><td class="num muted">${x.rev_tce_rank}</td>${uTd(x)}</tr>`).join("");
     }
     $("#body").innerHTML = `
       <div class="kpis">

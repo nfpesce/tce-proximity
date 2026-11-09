@@ -259,7 +259,7 @@ async function ww(prox) {
 async function shipWw(prox) {
   const key = JSON.stringify(["ship", engine.shipFile(), prox, S().mapping()]);
   if (wwMemo?.key === key) return wwMemo.result;
-  const active = engine.currentGeo(), perGeo = {}, files = {}, revAll = {};
+  const active = engine.currentGeo(), perGeo = {}, files = {}, revAll = {}, units = {};
   try {
     for (const g of engine.SHIP_GEOS) {
       progress(`WW ranking: ${g}…`);
@@ -269,12 +269,13 @@ async function shipWw(prox) {
       perGeo[g] = [await engine.fcRanking(prox, "exactly", null, null, null, false), await engine.dependency()];
       files[g] = engine.shipFile();
       revAll[g] = engine.fcRevAll();
+      units[g] = engine.fcUnits();
     }
   } finally {
     await engine.selectGeo(active);
     await engine.applyOverrides(S().mapping());
   }
-  const result = engine.combineWw(perGeo, files, prox ?? [], { geoList: engine.SHIP_GEOS, revAll, source: "shipments" });
+  const result = engine.combineWw(perGeo, files, prox ?? [], { geoList: engine.SHIP_GEOS, revAll, units, source: "shipments" });
   if (!prox) result.filters.proximity = null;
   wwMemo = { key, result };
   return result;
@@ -363,18 +364,21 @@ export async function exportUrl(url) {
     return writeXlsx({ "TCE Dependency": depRows((await api(base.href)).rows) }, "TCE_Dependency_by_FC.xlsx");
   if (path === "/api/export/ww.xlsx") {
     const r = await api(base.href), geos = r.geos;
+    // shipments: unidades despachadas del SBB (sbbqty) por geo y WW (como export_ww en main.py)
+    const unitCols = x => !("units" in x) ? {} :
+      { "Shipped units WW": x.units_ww, ...Object.fromEntries(geos.map(g => [`Shipped units ${g}`, x.units[g] || 0])) };
     const p = r.proximity.rows.map((x, i) => ({
       Rank: i + 1, FC: x.featurecode, Description: x.description, ...refCols(x), "Total Configs WW": x.configs_ww,
       ...Object.fromEntries(geos.map(g => [g, x.configs[g] || 0])), "# of Geos": x.n_geos, "% of WW Configs": x.pct,
       "Cumulative %": x.cum_pct, "Rev Contrib WW (USD)": x.rev_contrib_usd_ww,
       ...Object.fromEntries(geos.map(g => [`Rev Contrib ${g}`, x.rev_contrib_usd[g] || 0])),
-      "% of WW Rev Contrib": x.rev_pct, "Rank by Rev Contrib": x.rev_rank }));
+      "% of WW Rev Contrib": x.rev_pct, "Rank by Rev Contrib": x.rev_rank, ...unitCols(x) }));
     const d = r.dependency.rows.map((x, i) => ({
       Rank: i + 1, FC: x.featurecode, Description: x.description, ...refCols(x), "Total TCE Configs WW": x.configs_ww,
       ...Object.fromEntries(geos.map(g => [g, x.configs[g] || 0])), "# of Geos": x.n_geos, "% of WW TCE Configs": x.pct,
       "Rev Contrib All WW (USD)": x.rev_all_usd_ww, ...Object.fromEntries(geos.map(g => [`Rev Contrib All ${g}`, x.rev_all_usd[g] || 0])),
       "Rev Contrib TCE Sel WW (USD)": x.rev_tce_usd_ww, ...Object.fromEntries(geos.map(g => [`Rev Contrib TCE Sel ${g}`, x.rev_tce_usd[g] || 0])),
-      "TCE Sel / All": x.tce_share, "Rank by Rev Contrib TCE Sel": x.rev_tce_rank }));
+      "TCE Sel / All": x.tce_share, "Rank by Rev Contrib TCE Sel": x.rev_tce_rank, ...unitCols(x) }));
     const files = geos.map(g => ({ geo: g, file: r.files[g], "Configs in scope (proximity)": r.proximity.configs_by_geo[g],
                                    "TCE configs in scope (dependency)": r.dependency.configs_by_geo[g] }));
     const label = r.filters.proximity === null ? "all" : [].concat(r.filters.proximity).join("-");

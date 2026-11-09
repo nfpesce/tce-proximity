@@ -220,7 +220,7 @@ export async function loadFile(file, name = file.name, { onProgress } = {}) {
       const header = (await rows(`DESCRIBE SELECT * FROM ${src}`)).map(r => r.column_name);
       if (SHIP_COLUMNS.every(c => header.includes(c)) && !EXPECTED_COLUMNS.every(c => header.includes(c))) {
         regs = [];
-        return await loadShipments(file, name, reg, src);
+        return await loadShipments(file, name, reg, src, header.includes("sbbqty"));
       }
       const missing = EXPECTED_COLUMNS.filter(c => !header.includes(c));
       if (missing.length) throw new DataError(`Missing columns in ${name}: ${missing.join(", ")}`);
@@ -275,7 +275,7 @@ export async function loadFile(file, name = file.name, { onProgress } = {}) {
 async function buildDs(name, source, geoSel = null) {
   const s = source === "shipments";
   const fc = await rows(`SELECT featurecode, arg_min(description, rid) AS d, arg_min(tce_csv, rid) AS t, min(rid) AS r,
-                           ${s ? "arg_min(sbb_fcs, rid) AS fcs, arg_min(basicname, rid) AS bn," : ""}
+                           ${s ? "arg_min(sbb_fcs, rid) AS fcs, arg_min(basicname, rid) AS bn, COALESCE(sum(sbb_qty), 0) AS units," : ""}
                            COALESCE(sum(value_usd), 0) AS rev FROM raw GROUP BY featurecode ORDER BY r`);
   const firsts = await rows(`SELECT * FROM raw WHERE rid IN (SELECT min(rid) FROM raw GROUP BY bid_item)`);
   const geo = (await rows(`SELECT geo, count(*) n FROM raw WHERE geo <> '' GROUP BY geo ORDER BY n DESC, geo LIMIT 1`))[0]?.geo;
@@ -286,6 +286,7 @@ async function buildDs(name, source, geoSel = null) {
     fcRevAll: new Map(fc.map(r => [r.featurecode, r.rev])),
     fcRef: new Map(s ? fc.map(r => [r.featurecode, r.fcs]) : []),
     fcBasic: new Map(s ? fc.map(r => [r.featurecode, r.bn]) : []),
+    fcUnits: new Map(s ? fc.map(r => [r.featurecode, r.units]) : []),  // shipments: unidades (sbbqty) por SBB
     quotes: (await rows(`SELECT DISTINCT quotenumber q FROM raw`)).map(r => r.q),
     bidFirst: new Map(firsts.map(r => [r.bid_item, r])),
     prox: new Map(),
@@ -295,12 +296,12 @@ async function buildDs(name, source, geoSel = null) {
 }
 
 /** Shipments (CSV): normaliza el archivo entero en `ship_all` (sin PRC) y activa la primera geo */
-async function loadShipments(file, name, reg, src) {
+async function loadShipments(file, name, reg, src, hasQty = false) {
   // nulos de la query exportados como el texto NULL -> vacío (salvo el código del SBB, como en Python)
   const v = c => c === "sbb" ? `COALESCE("sbb", '')` : `CASE WHEN "${c}" = 'NULL' THEN '' ELSE COALESCE("${c}", '') END`;
   try {
     await conn.query(`CREATE OR REPLACE TABLE ship_src AS SELECT (row_number() OVER ()) - 1 AS rid,
-        ${SHIP_COLUMNS.map(c => `${v(c)} AS "${c}"`).join(", ")} FROM ${src}`);
+        ${SHIP_COLUMNS.map(c => `${v(c)} AS "${c}"`).join(", ")}, ${hasQty ? v("sbbqty") : "''"} AS sbbqty FROM ${src}`);
     await conn.query(`DELETE FROM ship_src WHERE geo NOT IN (${SHIP_GEOS.map(sq).join(", ")})`);
     const cnt = (await rows(`SELECT CAST(count(*) AS INTEGER) n FROM ship_src`))[0].n;
     if (!cnt) throw new DataError(`${name} has no rows`);
@@ -324,7 +325,8 @@ async function loadShipments(file, name, reg, src) {
         '' AS sales_rep, 'USD' AS currency, sot.total AS totalfinalprice, s.cfg_value AS value_usd, '' AS express,
         CASE WHEN s.end_customer_number = '' THEN ${sq(NO_OPP)} ELSE s.end_customer_number END AS opp_label,
         CASE WHEN s.end_customer_name = '' THEN ${sq(NO_ACCOUNT)} ELSE s.end_customer_name END AS account_label,
-        s.fc AS ref_fc, COALESCE(fcs.fcs, '') AS sbb_fcs, s.basicname, s.tce AS order_tce, s.cto
+        s.fc AS ref_fc, COALESCE(fcs.fcs, '') AS sbb_fcs, s.basicname, s.tce AS order_tce, s.cto,
+        ${hasQty ? "TRY_CAST(REPLACE(TRIM(s.sbbqty), ',', '') AS DOUBLE)" : "TRY_CAST(s.qty AS DOUBLE) * TRY_CAST(s.sbbusage AS DOUBLE)"} AS sbb_qty
       FROM s LEFT JOIN sot ON sot.so = s.so LEFT JOIN fcs ON fcs.sbb = s.sbb ORDER BY s.rid`);
   } catch (e) {
     await conn.query("DROP TABLE IF EXISTS ship_src");
@@ -379,6 +381,7 @@ export function fcExists(fc) { return need().fcCsvTce.has(fc); }
 /** Columnas de referencia de un SBB (FC(s) y basicname); vacío en quotes (como Dataset.ref en Python) */
 const ref = fc => ds.source !== "shipments" ? {} : { ref_fc: ds.fcRef.get(fc) ?? "", basicname: ds.fcBasic.get(fc) ?? "" };
 export function fcRevAll() { return new Map(need().fcRevAll); }
+export function fcUnits() { return new Map(need().fcUnits); }
 export function fcCsvTce(fc) { return need().fcCsvTce.get(fc) ?? null; }
 export function fcDescription(fc) { return need().fcDescription.get(fc) ?? ""; }
 export function fcCsvMap() { return new Map(need().fcCsvTce); }
@@ -749,7 +752,8 @@ export async function fcLookup(code, express = null, currency = null) {
 /** Combina los rankings de cada geo como DataStore.ww() de Python. perGeo: {geo: [fcRanking sin bids, dependency]}
  *  Shipments: geoList = SHIP_GEOS y revAll = {geo: Map(sbb -> rev contrib)} para mostrar la Rev Contrib de cada geo
  *  aunque el SBB no tenga configs en scope (WW_FILL_REV en Python). */
-export function combineWw(perGeo, files, prox, { geoList = GEOS, revAll = null, source = "quotes" } = {}) {
+export function combineWw(perGeo, files, prox, { geoList = GEOS, revAll = null, units = null, source = "quotes" } = {}) {
+  const hasUnits = !!units && Object.values(units).some(m => m.size);
   const geos = geoList.filter(g => g in perGeo);
   const combine = (part, totalKey, valueKeys) => {
     const rows = new Map();
@@ -767,6 +771,11 @@ export function combineWw(perGeo, files, prox, { geoList = GEOS, revAll = null, 
     const out = [...rows.values()].map(x => {
       for (const v of fill) for (const g of geos)
         if (!(g in x[v]) && revAll[g].get(x.featurecode)) x[v][g] = usd(revAll[g].get(x.featurecode));
+      if (hasUnits) {  // shipments: unidades despachadas del SBB por geo (todas sus configs) y WW
+        x.units = {};
+        for (const g of geos) if (units[g]?.get(x.featurecode)) x.units[g] = Math.round(units[g].get(x.featurecode));
+        x.units_ww = Object.values(x.units).reduce((a, b) => a + b, 0);
+      }
       x.configs_ww = Object.values(x.configs).reduce((a, b) => a + b, 0);
       x.n_geos = Object.values(x.configs).filter(v => v > 0).length;
       x.pct = totalAll ? x.configs_ww / totalAll : 0;
@@ -795,6 +804,6 @@ export function combineWw(perGeo, files, prox, { geoList = GEOS, revAll = null, 
   return {
     filters: { proximity: prox.length === 1 ? prox[0] : prox },
     source, geos, files, missing_geos: geoList.filter(g => !(g in perGeo)),
-    proximity: p, dependency: d,
+    proximity: p, dependency: d, has_units: hasUnits,
   };
 }
