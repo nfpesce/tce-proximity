@@ -39,7 +39,7 @@ function usdShort(n) {
   return "$" + money(n);
 }
 // importes de las tablas de ranking en millones, como el Excel ($4.65M); el valor completo en el tooltip
-const usdM = n => (n === null || n === undefined) ? "" : `<span title="$${money(n)}">$${(n / 1e6).toFixed(2)}M</span>`;
+const usdM = n => (n === null || n === undefined) ? "" : `<span title="$${money(n)}">$${(n / 1e6).toFixed(2)}</span>`;  // columnas rotuladas ($M)
 // Orden por columna (clic en el título): ▲ ascendente · ▼ descendente · ↕ = ordenable.
 // st = { key, dir }; key null = orden original. Primer clic: números de mayor a menor, textos de A a Z.
 function sortTh(label, key, st, cls = "", title = "") {
@@ -798,10 +798,10 @@ async function renderFc(params) {
       </div>
       <div class="table-wrap"><table>
         <thead><tr>${sortTh(L.code, "featurecode", st)}${sortTh("Description", "description", st)}${refTh(st)}${sortTh("Nbr of Configs", "configs", st, "num")}${sortTh("% configs", "configs", st, "num")}<th></th>
-          ${sortTh("Rev Contrib (USD)", "rev_contrib_usd", st, "num", `Revenue contribution: USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution of the query)`)}
+          ${sortTh("Rev Contrib ($M)", "rev_contrib_usd", st, "num", `Revenue contribution: USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution of the query)`)}
           ${sortTh("% Rev", "rev_pct", st, "num", `Share of the Rev Contrib of the listed ${L.codes}`)}
           ${sortTh("Rank Rev", "rev_rank", st, "num", "Rank by Rev Contrib")}
-          ${sortTh("Value of configs in scope (USD)", "value_in_scope_usd", st, "num", `USD value of the configs in scope that this ${L.code} blocks (what would become TCE if the ${L.code} were mapped)`)}</tr></thead>
+          ${sortTh("Value of configs in scope ($M)", "value_in_scope_usd", st, "num", `USD value of the configs in scope that this ${L.code} blocks (what would become TCE if the ${L.code} were mapped)`)}</tr></thead>
         <tbody>${rows || `<tr><td colspan="${9 + refN()}" class="empty">No configs match these criteria</td></tr>`}</tbody>
       </table></div>`;
     $$("tr.fc-row", $("#body")).forEach(tr => tr.onclick = e => {
@@ -875,8 +875,8 @@ async function renderDependency(params) {
       </div>
       <div class="table-wrap"><table>
         <thead><tr>${sortTh(L.code, "featurecode", st)}${sortTh("Description", "description", st)}${refTh(st)}${sortTh("Nbr of TCE Configs", "configs", st, "num")}${sortTh("% of TCE configs", "pct", st, "num")}<th></th>
-          ${sortTh("Rev Contrib All Configs (USD)", "rev_all_usd", st, "num", `USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution)`)}
-          ${sortTh("Rev Contrib TCE Sel (USD)", "rev_tce_usd", st, "num", `USD value of the fully TCE configurations with this ${L.code} (Revenue_Contribution_TCE_Sel)`)}
+          ${sortTh("Rev Contrib All Configs ($M)", "rev_all_usd", st, "num", `USD value of every configuration with this ${L.code} within the filters, TCE or not (revenue_contribution)`)}
+          ${sortTh("Rev Contrib TCE Sel ($M)", "rev_tce_usd", st, "num", `USD value of the fully TCE configurations with this ${L.code} (Revenue_Contribution_TCE_Sel)`)}
           ${sortTh("TCE Sel / All", "tce_share", st, "num", `Share of the ${L.code}'s revenue that already sits in TCE configs`)}
           ${sortTh("Rank Rev", "rev_tce_rank", st, "num", "Rank by Rev Contrib TCE Sel")}</tr></thead>
         <tbody>${rows || `<tr><td colspan="${9 + refN()}" class="empty">No TCE configs match these filters</td></tr>`}</tbody>
@@ -986,10 +986,10 @@ async function renderWw(params) {
     const uTd = x => U ? `<td class="num"><strong>${fmt(x.units_ww || 0)}</strong></td>` + geos.map(g => `<td class="num${x.units?.[g] ? "" : " zero"}">${fmt(x.units?.[g] || 0)}</td>`).join("") : "";
     let head, body;
     if (part === "proximity") {
-      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution (USD)</th>${uGroup}</tr>
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 4}" class="group">Configurations</th><th colspan="${geos.length + 3}" class="group">Revenue contribution ($M)</th>${uGroup}</tr>
         <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}${th("Cum. %", "cum_pct", "Cumulative % in the WW ranking order")}
-        ${th("Rev Contrib WW", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}${uHead}</tr>`;
+        ${th("Rev Contrib WW ($M)", "rev_contrib_usd_ww")}${geos.map(g => th(esc(g), "rev_contrib_usd." + g)).join("")}${th("% of WW Rev", "rev_pct")}${th("Rank Rev", "rev_rank")}${uHead}</tr>`;
       body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
         ${geos.map(g => `<td class="num${x.configs[g] ? "" : " zero"}">${fmt(x.configs[g] || 0)}</td>`).join("")}
@@ -997,11 +997,11 @@ async function renderWw(params) {
         <td class="num"><strong>${usdM(x.rev_contrib_usd_ww)}</strong></td>${geos.map(g => `<td class="num${x.rev_contrib_usd[g] ? "" : " zero"}">${usdM(x.rev_contrib_usd[g] || 0)}</td>`).join("")}
         <td class="num muted">${pctFmt(x.rev_pct)}</td><td class="num muted">${x.rev_rank}</td>${uTd(x)}</tr>`).join("");
     } else {
-      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs (USD)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel (USD)</th><th colspan="2"></th>${uGroup}</tr>
+      head = `<tr><th colspan="${3 + refN()}"></th><th colspan="${geos.length + 3}" class="group">TCE configurations</th><th colspan="${geos.length + 1}" class="group">Rev contrib — all configs ($M)</th><th colspan="${geos.length + 1}" class="group">Rev contrib — TCE Sel ($M)</th><th colspan="2"></th>${uGroup}</tr>
         <tr>${th("Rank", "_rank")}${th(L.code, "featurecode")}${th("Description", "description")}${refH}${th("Total WW", "configs_ww")}${geos.map(g => th(esc(g), "configs." + g)).join("")}
         ${th("# Geos", "n_geos")}${th("% of WW", "pct")}
-        ${th("All WW", "rev_all_usd_ww")}${geos.map(g => th(esc(g), "rev_all_usd." + g)).join("")}
-        ${th("TCE Sel WW", "rev_tce_usd_ww")}${geos.map(g => th(esc(g), "rev_tce_usd." + g)).join("")}
+        ${th("All WW ($M)", "rev_all_usd_ww")}${geos.map(g => th(esc(g), "rev_all_usd." + g)).join("")}
+        ${th("TCE Sel WW ($M)", "rev_tce_usd_ww")}${geos.map(g => th(esc(g), "rev_tce_usd." + g)).join("")}
         ${th("TCE Sel / All", "tce_share")}${th("Rank Rev", "rev_tce_rank")}${uHead}</tr>`;
       body = shown.map(x => `<tr><td class="num muted">${x._rank}</td><td class="mono"><a href="#/adjustments/${encodeURIComponent(x.featurecode)}" title="Look up / adjust this ${L.code}">${esc(x.featurecode)}</a></td>
         <td class="trunc" title="${esc(x.description)}">${esc(x.description)}</td>${refTd(x)}<td class="num"><strong>${fmt(x.configs_ww)}</strong></td>
